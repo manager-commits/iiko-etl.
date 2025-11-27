@@ -4,7 +4,6 @@ import requests
 import psycopg2
 from dotenv import load_dotenv
 
-# Загружаем переменные окружения (локально; в GitHub Actions secrets передаются напрямую)
 load_dotenv()
 
 IIKO_BASE_URL = os.getenv("IIKO_BASE_URL", "").rstrip("/")
@@ -23,11 +22,11 @@ def get_pg_connection():
     )
 
 
-def upsert_sales_daily(data: dict) -> None:
+def upsert_sales_daily(data):
     print("📦 Записываем данные в базу...")
 
     conn = get_pg_connection()
-    cursor = conn.cursor()
+    cur = conn.cursor()
 
     query = """
     INSERT INTO iiko_sales_daily (
@@ -47,7 +46,7 @@ def upsert_sales_daily(data: dict) -> None:
     """
 
     for row in data.get("data", []):
-        cursor.execute(
+        cur.execute(
             query,
             (
                 row["OpenDate.Typed"],
@@ -58,14 +57,13 @@ def upsert_sales_daily(data: dict) -> None:
         )
 
     conn.commit()
-    cursor.close()
+    cur.close()
     conn.close()
 
     print("✅ Данные записаны в базу!")
 
 
-def get_token() -> str:
-    """Авторизация в iiko, возвращает токен."""
+def get_token():
     url = f"{IIKO_BASE_URL}/api/auth"
     params = {"login": IIKO_LOGIN, "pass": IIKO_PASSWORD}
 
@@ -77,8 +75,7 @@ def get_token() -> str:
     return token
 
 
-def logout(token: str) -> None:
-    """Корректный выход из iiko."""
+def logout(token: str):
     url = f"{IIKO_BASE_URL}/api/logout"
     params = {"key": token}
     try:
@@ -87,24 +84,14 @@ def logout(token: str) -> None:
         print("⚠️ Ошибка при logout:", e)
 
 
-def fetch_sales_for_period(token: str, date_from: dt.date, date_to: dt.date) -> dict:
-    """
-    Запрос OLAP-отчёта SALES по дням.
-    groupByRowFields = OpenDate.Typed
-    агрегаты: количество блюд, сумма скидки, сумма продаж.
-    """
+def fetch_sales_for_period(token, date_from, date_to):
     url = f"{IIKO_BASE_URL}/api/v2/reports/olap"
 
     body = {
         "reportType": "SALES",
         "buildSummary": False,
         "groupByRowFields": ["OpenDate.Typed"],
-        "groupByColFields": [],
-        "aggregateFields": [
-            "DishAmountInt",
-            "DishDiscountSumInt",
-            "DishSumInt",
-        ],
+        "aggregateFields": ["DishAmountInt", "DishDiscountSumInt", "DishSumInt"],
         "filters": {
             "OpenDate.Typed": {
                 "filterType": "DateRange",
@@ -118,45 +105,44 @@ def fetch_sales_for_period(token: str, date_from: dt.date, date_to: dt.date) -> 
     }
 
     params = {"key": token}
-
-    print(f"Делаем OLAP-запрос SALES за период {date_from} – {date_to}...")
     resp = requests.post(url, params=params, json=body, timeout=60)
     resp.raise_for_status()
-
-    data = resp.json()
-    return data
+    return resp.json()
 
 
-def calculate_period():
+def get_period():
     """
-    Выбираем период в зависимости от режима:
-    - NOVEMBER_FULL: весь ноябрь текущего года
-    - DAILY (по умолчанию): только вчерашний день
+    1) Если заданы переменные START_DATE / END_DATE (для GitHub Actions) –
+       используем их.
+    2) Иначе – последние 7 дней (как было раньше).
     """
-    mode = os.getenv("ETL_MODE", "DAILY").upper()
+    # GitHub создаёт env вида INPUT_START_DATE, но мы будем смотреть и в START_DATE
+    start_str = (
+        os.getenv("START_DATE")
+        or os.getenv("INPUT_START_DATE")
+        or ""
+    )
+    end_str = (
+        os.getenv("END_DATE")
+        or os.getenv("INPUT_END_DATE")
+        or ""
+    )
+
+    if start_str and end_str:
+        start = dt.date.fromisoformat(start_str)
+        end = dt.date.fromisoformat(end_str)
+        return start, end
+
+    # fallback: последняя неделя
     today = dt.date.today()
-
-    if mode == "NOVEMBER_FULL":
-        year = today.year
-        date_from = dt.date(year, 11, 1)
-        date_to = dt.date(year, 11, 30)
-
-        # На всякий случай не лезем в будущее
-        max_to = today - dt.timedelta(days=1)
-        if date_to > max_to:
-            date_to = max_to
-    else:
-        # режим по умолчанию: только вчера
-        date_to = today - dt.timedelta(days=1)
-        date_from = date_to
-
-    return date_from, date_to, mode
+    date_to = today - dt.timedelta(days=1)
+    date_from = today - dt.timedelta(days=7)
+    return date_from, date_to
 
 
 def main():
-    date_from, date_to, mode = calculate_period()
-
-    print(f"🚀 Старт ETL (режим: {mode}). Период: {date_from} – {date_to}")
+    date_from, date_to = get_period()
+    print(f"🚀 Старт ETL. Период: {date_from} – {date_to}")
 
     token = get_token()
     try:
