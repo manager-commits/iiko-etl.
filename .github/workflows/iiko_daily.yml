@@ -36,4 +36,5 @@ jobs:
           pip install -r requirements.txt
 
       - name: Run iiko ETL
+      ETL_MODE: FULL_NOVEMBER
         run: python etl_iiko_daily.py
