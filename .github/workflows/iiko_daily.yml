@@ -1,9 +1,19 @@
 name: iiko daily ETL
 
 on:
+  # ручной запуск из Actions
+  workflow_dispatch:
+    inputs:
+      date_from:
+        description: 'Start date (YYYY-MM-DD)'
+        required: false
+      date_to:
+        description: 'End date (YYYY-MM-DD)'
+        required: false
+
+  # ежедневный запуск в 03:00 UTC
   schedule:
-    - cron: '0 3 * * *'   # каждый день в 03:00 UTC
-  workflow_dispatch: {}   # ручной запуск кнопкой
+    - cron: '0 3 * * *'
 
 jobs:
   etl:
@@ -36,5 +46,10 @@ jobs:
           pip install -r requirements.txt
 
       - name: Run iiko ETL
-      ETL_MODE: FULL_NOVEMBER
-        run: python etl_iiko_daily.py
+        env:
+          DATE_FROM: ${{ github.event.inputs.date_from }}
+          DATE_TO:   ${{ github.event.inputs.date_to }}
+        run: |
+          echo "DATE_FROM=${DATE_FROM}"
+          echo "DATE_TO=${DATE_TO}"
+          python etl_iiko_daily.py
