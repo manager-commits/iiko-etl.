@@ -4,16 +4,12 @@ import requests
 import psycopg2
 from dotenv import load_dotenv
 
+# Загружаем переменные окружения (локально; в GitHub Actions secrets передаются напрямую)
 load_dotenv()
 
 IIKO_BASE_URL = os.getenv("IIKO_BASE_URL", "").rstrip("/")
 IIKO_LOGIN = os.getenv("IIKO_LOGIN")
 IIKO_PASSWORD = os.getenv("IIKO_PASSWORD")
-
-# Режим работы ETL:
-# DAILY — тянем только вчера
-# FULL_NOVEMBER — один раз тянем весь ноябрь
-ETL_MODE = os.getenv("ETL_MODE", "DAILY")
 
 
 def get_pg_connection():
@@ -23,11 +19,11 @@ def get_pg_connection():
         dbname=os.getenv("PG_DB"),
         user=os.getenv("PG_USER"),
         password=os.getenv("PG_PASSWORD"),
-        sslmode=os.getenv("PG_SSLMODE", "require")
+        sslmode=os.getenv("PG_SSLMODE", "require"),
     )
 
 
-def upsert_sales_daily(data):
+def upsert_sales_daily(data: dict) -> None:
     print("📦 Записываем данные в базу...")
 
     conn = get_pg_connection()
@@ -50,13 +46,16 @@ def upsert_sales_daily(data):
         updated_at = now();
     """
 
-    for row in data["data"]:
-        cursor.execute(query, (
-            row["OpenDate.Typed"],
-            row["DishAmountInt"],
-            row["DishDiscountSumInt"],
-            row["DishSumInt"]
-        ))
+    for row in data.get("data", []):
+        cursor.execute(
+            query,
+            (
+                row["OpenDate.Typed"],
+                row["DishAmountInt"],
+                row["DishDiscountSumInt"],
+                row["DishSumInt"],
+            ),
+        )
 
     conn.commit()
     cursor.close()
@@ -65,7 +64,8 @@ def upsert_sales_daily(data):
     print("✅ Данные записаны в базу!")
 
 
-def get_token():
+def get_token() -> str:
+    """Авторизация в iiko, возвращает токен."""
     url = f"{IIKO_BASE_URL}/api/auth"
     params = {"login": IIKO_LOGIN, "pass": IIKO_PASSWORD}
 
@@ -77,55 +77,86 @@ def get_token():
     return token
 
 
-def logout(token: str):
+def logout(token: str) -> None:
+    """Корректный выход из iiko."""
     url = f"{IIKO_BASE_URL}/api/logout"
     params = {"key": token}
-    requests.post(url, params=params, timeout=10)
+    try:
+        requests.post(url, params=params, timeout=10)
+    except Exception as e:
+        print("⚠️ Ошибка при logout:", e)
 
 
-def fetch_sales_for_period(token, date_from, date_to):
+def fetch_sales_for_period(token: str, date_from: dt.date, date_to: dt.date) -> dict:
+    """
+    Запрос OLAP-отчёта SALES по дням.
+    groupByRowFields = OpenDate.Typed
+    агрегаты: количество блюд, сумма скидки, сумма продаж.
+    """
     url = f"{IIKO_BASE_URL}/api/v2/reports/olap"
 
     body = {
         "reportType": "SALES",
         "buildSummary": False,
         "groupByRowFields": ["OpenDate.Typed"],
-        "aggregateFields": ["DishAmountInt", "DishDiscountSumInt", "DishSumInt"],
+        "groupByColFields": [],
+        "aggregateFields": [
+            "DishAmountInt",
+            "DishDiscountSumInt",
+            "DishSumInt",
+        ],
         "filters": {
             "OpenDate.Typed": {
                 "filterType": "DateRange",
                 "periodType": "CUSTOM",
-                "from": str(date_from),
-                "to": str(date_to),
+                "from": date_from.strftime("%Y-%m-%d"),
+                "to": date_to.strftime("%Y-%m-%d"),
                 "includeLow": True,
-                "includeHigh": True
+                "includeHigh": True,
             }
-        }
+        },
     }
 
     params = {"key": token}
 
+    print(f"Делаем OLAP-запрос SALES за период {date_from} – {date_to}...")
     resp = requests.post(url, params=params, json=body, timeout=60)
     resp.raise_for_status()
-    return resp.json()
+
+    data = resp.json()
+    return data
 
 
-def main():
+def calculate_period():
+    """
+    Выбираем период в зависимости от режима:
+    - NOVEMBER_FULL: весь ноябрь текущего года
+    - DAILY (по умолчанию): только вчерашний день
+    """
+    mode = os.getenv("ETL_MODE", "DAILY").upper()
     today = dt.date.today()
 
-    if ETL_MODE == "FULL_NOVEMBER":
-        # ВЕСЬ НОЯБРЬ текущего года
+    if mode == "NOVEMBER_FULL":
         year = today.year
         date_from = dt.date(year, 11, 1)
         date_to = dt.date(year, 11, 30)
-        print("🟣 Режим: FULL_NOVEMBER (весь ноябрь)")
+
+        # На всякий случай не лезем в будущее
+        max_to = today - dt.timedelta(days=1)
+        if date_to > max_to:
+            date_to = max_to
     else:
-        # ЕЖЕДНЕВНО: тянем только вчера
+        # режим по умолчанию: только вчера
         date_to = today - dt.timedelta(days=1)
         date_from = date_to
-        print("🟢 Режим: DAILY (вчерашний день)")
 
-    print(f"🚀 Старт ETL. Период: {date_from} – {date_to}")
+    return date_from, date_to, mode
+
+
+def main():
+    date_from, date_to, mode = calculate_period()
+
+    print(f"🚀 Старт ETL (режим: {mode}). Период: {date_from} – {date_to}")
 
     token = get_token()
     try:
