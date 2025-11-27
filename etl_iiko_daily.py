@@ -112,31 +112,24 @@ def fetch_sales_for_period(token, date_from, date_to):
 
 def get_period():
     """
-    1) Если заданы переменные START_DATE / END_DATE (для GitHub Actions) –
+    1) Если заданы переменные DATE_FROM / DATE_TO (из GitHub Actions) –
        используем их.
-    2) Иначе – последние 7 дней (как было раньше).
+    2) Иначе – последние 7 дней (как раньше).
     """
-    # GitHub создаёт env вида INPUT_START_DATE, но мы будем смотреть и в START_DATE
-    start_str = (
-        os.getenv("START_DATE")
-        or os.getenv("INPUT_START_DATE")
-        or ""
-    )
-    end_str = (
-        os.getenv("END_DATE")
-        or os.getenv("INPUT_END_DATE")
-        or ""
-    )
+    date_from_str = os.getenv("DATE_FROM")
+    date_to_str = os.getenv("DATE_TO")
 
-    if start_str and end_str:
-        start = dt.date.fromisoformat(start_str)
-        end = dt.date.fromisoformat(end_str)
-        return start, end
+    if date_from_str and date_to_str:
+        date_from = dt.date.fromisoformat(date_from_str)
+        date_to = dt.date.fromisoformat(date_to_str)
+        print(f"Используем диапазон из ENV: {date_from} – {date_to}")
+        return date_from, date_to
 
     # fallback: последняя неделя
     today = dt.date.today()
     date_to = today - dt.timedelta(days=1)
     date_from = today - dt.timedelta(days=7)
+    print(f"Используем диапазон по умолчанию (последние 7 дней): {date_from} – {date_to}")
     return date_from, date_to
 
 
