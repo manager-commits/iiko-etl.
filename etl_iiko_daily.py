@@ -10,6 +10,11 @@ IIKO_BASE_URL = os.getenv("IIKO_BASE_URL", "").rstrip("/")
 IIKO_LOGIN = os.getenv("IIKO_LOGIN")
 IIKO_PASSWORD = os.getenv("IIKO_PASSWORD")
 
+# Режим работы ETL:
+# DAILY — тянем только вчера
+# FULL_NOVEMBER — один раз тянем весь ноябрь
+ETL_MODE = os.getenv("ETL_MODE", "DAILY")
+
 
 def get_pg_connection():
     return psycopg2.connect(
@@ -107,8 +112,18 @@ def fetch_sales_for_period(token, date_from, date_to):
 
 def main():
     today = dt.date.today()
-    date_to = today - dt.timedelta(days=1)
-    date_from = today - dt.timedelta(days=7)
+
+    if ETL_MODE == "FULL_NOVEMBER":
+        # ВЕСЬ НОЯБРЬ текущего года
+        year = today.year
+        date_from = dt.date(year, 11, 1)
+        date_to = dt.date(year, 11, 30)
+        print("🟣 Режим: FULL_NOVEMBER (весь ноябрь)")
+    else:
+        # ЕЖЕДНЕВНО: тянем только вчера
+        date_to = today - dt.timedelta(days=1)
+        date_from = date_to
+        print("🟢 Режим: DAILY (вчерашний день)")
 
     print(f"🚀 Старт ETL. Период: {date_from} – {date_to}")
 
@@ -116,9 +131,7 @@ def main():
     try:
         data = fetch_sales_for_period(token, date_from, date_to)
         print("✅ Данные получены от iiko")
-
         upsert_sales_daily(data)
-
     finally:
         logout(token)
         print("🔐 Logout выполнен.")
