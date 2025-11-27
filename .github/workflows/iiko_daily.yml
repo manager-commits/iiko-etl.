@@ -1,0 +1,39 @@
+name: iiko daily ETL
+
+on:
+  schedule:
+    - cron: '0 3 * * *'   # каждый день в 03:00 UTC
+  workflow_dispatch: {}   # ручной запуск кнопкой
+
+jobs:
+  etl:
+    runs-on: ubuntu-latest
+
+    env:
+      IIKO_BASE_URL:  ${{ secrets.IIKO_BASE_URL }}
+      IIKO_LOGIN:     ${{ secrets.IIKO_LOGIN }}
+      IIKO_PASSWORD:  ${{ secrets.IIKO_PASSWORD }}
+
+      PG_HOST:        ${{ secrets.PG_HOST }}
+      PG_PORT:        ${{ secrets.PG_PORT }}
+      PG_DB:          ${{ secrets.PG_DB }}
+      PG_USER:        ${{ secrets.PG_USER }}
+      PG_PASSWORD:    ${{ secrets.PG_PASSWORD }}
+      PG_SSLMODE:     ${{ secrets.PG_SSLMODE }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run iiko ETL
+        run: python etl_iiko_daily.py
