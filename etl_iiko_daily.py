@@ -125,11 +125,11 @@ def get_period():
         print(f"Используем диапазон из ENV: {date_from} – {date_to}")
         return date_from, date_to
 
-    # fallback: последняя неделя
+    # fallback: вчера
     today = dt.date.today()
     date_to = today - dt.timedelta(days=1)
-    date_from = today - dt.timedelta(days=7)
-    print(f"Используем диапазон по умолчанию (последние 7 дней): {date_from} – {date_to}")
+    date_from = today - dt.timedelta(days=1)
+    print(f"Используем диапазон по умолчанию (вчера): {date_from} – {date_to}")
     return date_from, date_to
 
 
