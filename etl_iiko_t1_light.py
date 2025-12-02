@@ -64,7 +64,7 @@ def get_period():
 
 # Заглушка — здесь позже будет запрос OLAP
 def fetch_t1_light(token, date_from, date_to):
-    print("📡 Загружаем данные TI Light из iiko...")
+    print("📦 Загружаем данные TI Light из iiko...")
 
     url = f"{IIKO_BASE_URL}/api/v2/reports/olap"
     params = {"key": token}
@@ -89,10 +89,9 @@ def fetch_t1_light(token, date_from, date_to):
             "Delivery.CustomerName",
             "Delivery.Phone",
             "Delivery.Address",
-            "Delivery.Courier"
+            "Delivery.Courier",
         ],
         "aggregateFields": [],
-
         "filters": {
             "SessionID.OperDay": {
                 "filterType": "DateRange",
@@ -100,36 +99,43 @@ def fetch_t1_light(token, date_from, date_to):
                 "from": date_from.strftime("%Y-%m-%d"),
                 "to": date_to.strftime("%Y-%m-%d"),
                 "includeLow": True,
-                "includeHigh": False
+                "includeHigh": False,
             },
             "Storned": {
                 "filterType": "IncludeValues",
-                "values": ["FALSE"]
+                "values": ["FALSE"],
             },
             "DeletedWithWriteoff": {
                 "filterType": "IncludeValues",
-                "values": ["NOT_DELETED"]
+                "values": ["NOT_DELETED"],
             },
             "Department": {
                 "filterType": "IncludeValues",
-                "values": ["Авиагородок", "Домодедово"]
+                "values": ["Авиагородок", "Домодедово"],
             },
             "OrderDeleted": {
                 "filterType": "IncludeValues",
-                "values": ["NOT_DELETED"]
+                "values": ["NOT_DELETED"],
             },
             "Delivery.CookingFinishTime": {
                 "filterType": "ExcludeValues",
-                "values": [None]
+                "values": [None],
             },
             "Delivery.Courier": {
                 "filterType": "ExcludeValues",
-                "values": [None, "Самовывоз"]
-            }
-        }
+                "values": [None, "Самовывоз"],
+            },
+        },
     }
 
     resp = requests.post(url, params=params, json=body, timeout=90)
+
+    # 🔍 ВРЕМЕННО: выводим, что именно отвечает iiko
+    print("HTTP статус iiko:", resp.status_code)
+    print("Тело ответа iiko (первые 1000 символов):")
+    print(resp.text[:1000])
+
+    # если всё ок – продолжаем как раньше
     resp.raise_for_status()
 
     print("✅ Данные получены")
