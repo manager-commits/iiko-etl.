@@ -99,7 +99,7 @@ def fetch_t1_light(token, date_from, date_to):
                 "from": date_from.strftime("%Y-%m-%d"),
                 "to": date_to.strftime("%Y-%m-%d"),
                 "includeLow": True,
-                "includeHigh": False,
+                "includeHigh": True,
             },
             "Storned": {
                 "filterType": "IncludeValues",
