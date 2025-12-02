@@ -93,7 +93,7 @@ def fetch_t1_light(token, date_from, date_to):
         ],
         "aggregateFields": [],
         "filters": {
-            "SessionID.OperDay": {
+            "OpenDate.Typed": {
                 "filterType": "DateRange",
                 "periodType": "CUSTOM",
                 "from": date_from.strftime("%Y-%m-%d"),
