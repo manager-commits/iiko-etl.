@@ -64,8 +64,76 @@ def get_period():
 
 # Заглушка — здесь позже будет запрос OLAP
 def fetch_t1_light(token, date_from, date_to):
-    print("⚙️ (позже здесь будет запрос к iiko OLAP)")
-    return {"data": []}
+    print("📡 Загружаем данные TI Light из iiko...")
+
+    url = f"{IIKO_BASE_URL}/api/v2/reports/olap"
+    params = {"key": token}
+
+    body = {
+        "reportType": "SALES",
+        "buildSummary": False,
+        "groupByRowFields": [
+            "Delivery.CookingFinishTime",
+            "OpenTime",
+            "Delivery.PrintTime",
+            "Delivery.SendTime",
+            "Delivery.ActualTime",
+            "Delivery.CloseTime",
+            "Delivery.ExpectedTime",
+            "OpenDate.Typed",
+            "Delivery.SourceKey",
+            "Delivery.DeliveryComment",
+            "Department",
+            "Delivery.Region",
+            "Delivery.Number",
+            "Delivery.CustomerName",
+            "Delivery.Phone",
+            "Delivery.Address",
+            "Delivery.Courier"
+        ],
+        "aggregateFields": [],
+
+        "filters": {
+            "SessionID.OperDay": {
+                "filterType": "DateRange",
+                "periodType": "CUSTOM",
+                "from": date_from.strftime("%Y-%m-%d"),
+                "to": date_to.strftime("%Y-%m-%d"),
+                "includeLow": True,
+                "includeHigh": False
+            },
+            "Storned": {
+                "filterType": "IncludeValues",
+                "values": ["FALSE"]
+            },
+            "DeletedWithWriteoff": {
+                "filterType": "IncludeValues",
+                "values": ["NOT_DELETED"]
+            },
+            "Department": {
+                "filterType": "IncludeValues",
+                "values": ["Авиагородок", "Домодедово"]
+            },
+            "OrderDeleted": {
+                "filterType": "IncludeValues",
+                "values": ["NOT_DELETED"]
+            },
+            "Delivery.CookingFinishTime": {
+                "filterType": "ExcludeValues",
+                "values": [None]
+            },
+            "Delivery.Courier": {
+                "filterType": "ExcludeValues",
+                "values": [None, "Самовывоз"]
+            }
+        }
+    }
+
+    resp = requests.post(url, params=params, json=body, timeout=90)
+    resp.raise_for_status()
+
+    print("✅ Данные получены")
+    return resp.json()
 
 # Заглушка — здесь позже будет запись в таблицу
 def upsert_t1_light(data):
