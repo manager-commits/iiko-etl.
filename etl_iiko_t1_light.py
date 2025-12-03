@@ -143,21 +143,83 @@ def fetch_t1_light(token, date_from, date_to):
 
 # Заглушка — здесь позже будет запись в таблицу
 def upsert_t1_light(data):
-    """
-    ВРЕМЕННАЯ версия:
-    просто смотрим, что пришло от iiko, без записи в базу
-    """
+    print("💾 Запись данных в базу Neon...")
+
     rows = data.get("data", [])
-    print(f"📊 Получено строк из отчёта: {len(rows)}")
+    print(f"📊 Получено строк: {len(rows)}")
 
     if not rows:
-        print("⚠️ Отчёт пустой, нечего показывать.")
+        print("⚠️ Нет данных для записи")
         return
 
-    first = rows[0]
-    print("🔎 Пример первой строки (ключи и значения):")
-    for key, value in first.items():
-        print(f"  {key}: {value}")
+    conn = get_pg_connection()
+    cur = conn.cursor()
+
+    query = """
+    INSERT INTO iiko_t1_light (
+        delivery_cooking_finish_time,
+        open_time,
+        delivery_print_time,
+        delivery_send_time,
+        delivery_actual_time,
+        delivery_close_time,
+        delivery_expected_time,
+        open_date,
+        delivery_source_key,
+        delivery_comment,
+        department,
+        delivery_region,
+        delivery_number,
+        delivery_customer_name,
+        delivery_phone,
+        delivery_address,
+        delivery_courier,
+        updated_at
+    )
+    VALUES (
+        %(Delivery.CookingFinishTime)s,
+        %(OpenTime)s,
+        %(Delivery.PrintTime)s,
+        %(Delivery.SendTime)s,
+        %(Delivery.ActualTime)s,
+        %(Delivery.CloseTime)s,
+        %(Delivery.ExpectedTime)s,
+        %(OpenDate.Typed)s,
+        %(Delivery.SourceKey)s,
+        %(Delivery.DeliveryComment)s,
+        %(Department)s,
+        %(Delivery.Region)s,
+        %(Delivery.Number)s,
+        %(Delivery.CustomerName)s,
+        %(Delivery.Phone)s,
+        %(Delivery.Address)s,
+        %(Delivery.Courier)s,
+        now()
+    )
+    ON CONFLICT (department, delivery_cooking_finish_time, delivery_number)
+    DO UPDATE SET
+        delivery_print_time = EXCLUDED.delivery_print_time,
+        delivery_send_time = EXCLUDED.delivery_send_time,
+        delivery_actual_time = EXCLUDED.delivery_actual_time,
+        delivery_close_time = EXCLUDED.delivery_close_time,
+        delivery_expected_time = EXCLUDED.delivery_expected_time,
+        delivery_source_key = EXCLUDED.delivery_source_key,
+        delivery_comment = EXCLUDED.delivery_comment,
+        delivery_customer_name = EXCLUDED.delivery_customer_name,
+        delivery_phone = EXCLUDED.delivery_phone,
+        delivery_address = EXCLUDED.delivery_address,
+        delivery_courier = EXCLUDED.delivery_courier,
+        updated_at = now();
+    """
+
+    for row in rows:
+        cur.execute(query, row)
+
+    conn.commit()
+    cur.close()
+    conn.close()
+
+    print("✅ Данные успешно записаны!")
 
 # Основной процесс ETL
 def main():
