@@ -1,24 +1,33 @@
-name: iiko TI light ETL
+name: iiko T1 light ETL
 
 on:
+  # Ручной запуск с датами
   workflow_dispatch:
     inputs:
-      DATE_FROM:
-        description: 'Дата начала периода (YYYY-MM-DD)'
+      date_from:
+        description: 'Начало периода (YYYY-MM-DD)'
         required: false
-      DATE_TO:
-        description: 'Дата конца периода (YYYY-MM-DD)'
+      date_to:
+        description: 'Конец периода (YYYY-MM-DD)'
         required: false
+
+  # Авто-запуск каждый день
+  # GitHub Actions работает в UTC.
+  # 03:00 UTC = 06:00 по Москве.
+  schedule:
+    - cron: '0 3 * * *'
 
 jobs:
   etl:
     runs-on: ubuntu-latest
 
     env:
+      # iiko
       IIKO_BASE_URL: ${{ secrets.IIKO_BASE_URL }}
       IIKO_LOGIN: ${{ secrets.IIKO_LOGIN }}
       IIKO_PASSWORD: ${{ secrets.IIKO_PASSWORD }}
 
+      # Postgres (Neon)
       PG_HOST: ${{ secrets.PG_HOST }}
       PG_PORT: ${{ secrets.PG_PORT }}
       PG_DB: ${{ secrets.PG_DB }}
@@ -26,9 +35,10 @@ jobs:
       PG_PASSWORD: ${{ secrets.PG_PASSWORD }}
       PG_SSLMODE: ${{ secrets.PG_SSLMODE }}
 
-      # Период, который мы можем задать руками при запуске workflow
-      DATE_FROM: ${{ github.event.inputs.DATE_FROM }}
-      DATE_TO: ${{ github.event.inputs.DATE_TO }}
+      # Даты. При автоматическом запуске они будут пустыми,
+      # и скрипт сам возьмёт "вчера".
+      DATE_FROM: ${{ github.event.inputs.date_from }}
+      DATE_TO: ${{ github.event.inputs.date_to }}
 
     steps:
       - name: Checkout repo
@@ -44,6 +54,6 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Run iiko TI Light ETL
+      - name: Run iiko T1 Light ETL
         run: |
           python etl_iiko_t1_light.py
