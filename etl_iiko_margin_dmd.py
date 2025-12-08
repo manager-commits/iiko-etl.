@@ -35,7 +35,7 @@ def get_token():
 def logout(token):
     try:
         requests.post(f"{IIKO_BASE_URL}/api/logout", params={"key": token}, timeout=10)
-    except:
+    except Exception:
         pass
 
 # Период
@@ -55,7 +55,10 @@ def get_period():
 
     # default: вчера
     yesterday = dt.date.today() - dt.timedelta(days=1)
-    return yesterday, yesterday + dt.timedelta(days=1)
+    date_from = yesterday
+    date_to = yesterday + dt.timedelta(days=1)
+    print(f"📅 Default period: {date_from} → {date_to}")
+    return date_from, date_to
 
 # Запрос в iiko
 def fetch_data(token, date_from, date_to):
@@ -86,7 +89,7 @@ def fetch_data(token, date_from, date_to):
                 "from": date_from.strftime("%Y-%m-%d"),
                 "to": date_to.strftime("%Y-%m-%d"),
                 "includeLow": True,
-                "includeHigh": True,  # ты выбрал так — оставляем
+                "includeHigh": True,  # оставляем твой вариант
             },
             "Storned": {"filterType": "IncludeValues", "values": ["FALSE"]},
             "DeletedWithWriteoff": {"filterType": "IncludeValues", "values": ["NOT_DELETED"]},
@@ -99,7 +102,8 @@ def fetch_data(token, date_from, date_to):
     print("HTTP:", r.status_code)
     r.raise_for_status()
 
-    return r.json().get("data", [])
+    data = r.json().get("data", [])
+    return data
 
 
 # ===================== INSERT / UPSERT ===================== #
@@ -138,9 +142,13 @@ def save_to_db(rows):
     """
 
     for r in rows:
-        # Подмена NULL зоны
+        # Нормализуем зону: NULL/пустое -> "Без зоны"
         if r.get("Delivery.Region") in (None, "", "null"):
             r["Delivery.Region"] = "Без зоны"
+
+        # Нормализуем источник доставки: NULL/пустое -> "Не указан"
+        if r.get("Delivery.SourceKey") in (None, "", "null"):
+            r["Delivery.SourceKey"] = "Не указан"
 
         cur.execute(query, r)
 
@@ -150,11 +158,11 @@ def save_to_db(rows):
 
     print(f"💾 Saved {len(rows)} rows to Neon.")
 
-
 # ============================================================
 
 def main():
     date_from, date_to = get_period()
+    print(f"🚀 Margin DMD ETL: {date_from} → {date_to}")
     token = get_token()
 
     try:
