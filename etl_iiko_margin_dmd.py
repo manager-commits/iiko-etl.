@@ -91,10 +91,22 @@ def fetch_data(token, date_from, date_to):
                 "includeLow": True,
                 "includeHigh": True,  # оставляем твой вариант
             },
-            "Storned": {"filterType": "IncludeValues", "values": ["FALSE"]},
-            "DeletedWithWriteoff": {"filterType": "IncludeValues", "values": ["NOT_DELETED"]},
-            "Department": {"filterType": "IncludeValues", "values": ["Авиагородок", "Домодедово"]},
-            "OrderDeleted": {"filterType": "IncludeValues", "values": ["NOT_DELETED"]},
+            "Storned": {
+                "filterType": "IncludeValues",
+                "values": ["FALSE"],
+            },
+            "DeletedWithWriteoff": {
+                "filterType": "IncludeValues",
+                "values": ["NOT_DELETED"],
+            },
+            "Department": {
+                "filterType": "IncludeValues",
+                "values": ["Авиагородок", "Домодедово"],
+            },
+            "OrderDeleted": {
+                "filterType": "IncludeValues",
+                "values": ["NOT_DELETED"],
+            },
         },
     }
 
@@ -149,6 +161,10 @@ def save_to_db(rows):
         # Нормализуем источник доставки: NULL/пустое -> "Не указан"
         if r.get("Delivery.SourceKey") in (None, "", "null"):
             r["Delivery.SourceKey"] = "Не указан"
+
+        # Нормализуем тип заказа: NULL/пустое -> "Не указан"
+        if r.get("OrderType") in (None, "", "null"):
+            r["OrderType"] = "Не указан"
 
         cur.execute(query, r)
 
