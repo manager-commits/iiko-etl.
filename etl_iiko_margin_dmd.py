@@ -23,7 +23,6 @@ def get_pg_connection():
         sslmode=os.getenv("PG_SSLMODE", "require"),
     )
 
-# Получаем токен
 def get_token():
     url = f"{IIKO_BASE_URL}/api/auth"
     resp = requests.get(url, params={"login": IIKO_LOGIN, "pass": IIKO_PASSWORD}, timeout=30)
@@ -38,7 +37,6 @@ def logout(token):
     except Exception:
         pass
 
-# Период
 def get_period():
     f = os.getenv("DATE_FROM")
     t = os.getenv("DATE_TO")
@@ -46,21 +44,17 @@ def get_period():
     if f and t:
         date_from = dt.date.fromisoformat(f)
         date_to = dt.date.fromisoformat(t)
-
-        if date_to <= date_from:         # защита от 409
+        if date_to <= date_from:
             date_to = date_from + dt.timedelta(days=1)
-
         print(f"📅 Period from ENV: {date_from} → {date_to}")
         return date_from, date_to
 
-    # default: вчера
     yesterday = dt.date.today() - dt.timedelta(days=1)
     date_from = yesterday
     date_to = yesterday + dt.timedelta(days=1)
     print(f"📅 Default period: {date_from} → {date_to}")
     return date_from, date_to
 
-# Запрос в iiko
 def fetch_data(token, date_from, date_to):
     print("📦 Fetching Margin DMD data...")
 
@@ -72,6 +66,7 @@ def fetch_data(token, date_from, date_to):
         "groupByRowFields": [
             "CloseTime",
             "OpenTime",
+            "OpenDate.Typed",        # 👈 учётный день
             "Department",
             "Delivery.SourceKey",
             "OrderType",
@@ -89,7 +84,7 @@ def fetch_data(token, date_from, date_to):
                 "from": date_from.strftime("%Y-%m-%d"),
                 "to": date_to.strftime("%Y-%m-%d"),
                 "includeLow": True,
-                "includeHigh": True,  # оставляем твой вариант
+                "includeHigh": True,
             },
             "Storned": {
                 "filterType": "IncludeValues",
@@ -117,9 +112,6 @@ def fetch_data(token, date_from, date_to):
     data = r.json().get("data", [])
     return data
 
-
-# ===================== INSERT / UPSERT ===================== #
-
 def save_to_db(rows):
     if not rows:
         print("⚠️ No rows.")
@@ -130,13 +122,23 @@ def save_to_db(rows):
 
     query = """
     INSERT INTO iiko_margin_dmd (
-        department, close_time, open_time, delivery_source_key, order_type, delivery_region,
-        dish_sum_int, discount_sum, product_cost, updated_at
+        department,
+        close_time,
+        open_time,
+        open_date,
+        delivery_source_key,
+        order_type,
+        delivery_region,
+        dish_sum_int,
+        discount_sum,
+        product_cost,
+        updated_at
     )
     VALUES (
         %(Department)s,
         %(CloseTime)s,
         %(OpenTime)s,
+        %(OpenDate.Typed)s,
         %(Delivery.SourceKey)s,
         %(OrderType)s,
         %(Delivery.Region)s,
@@ -147,22 +149,21 @@ def save_to_db(rows):
     )
     ON CONFLICT (department, close_time, open_time, delivery_source_key, order_type, delivery_region)
     DO UPDATE SET
-        dish_sum_int   = EXCLUDED.dish_sum_int,
-        discount_sum   = EXCLUDED.discount_sum,
-        product_cost   = EXCLUDED.product_cost,
-        updated_at     = now();
+        open_date     = EXCLUDED.open_date,
+        dish_sum_int  = EXCLUDED.dish_sum_int,
+        discount_sum  = EXCLUDED.discount_sum,
+        product_cost  = EXCLUDED.product_cost,
+        updated_at    = now();
     """
 
     for r in rows:
-        # Нормализуем зону: NULL/пустое -> "Без зоны"
+        # Нормализация полей, которые нам нужны NOT NULL в ключе
         if r.get("Delivery.Region") in (None, "", "null"):
             r["Delivery.Region"] = "Без зоны"
 
-        # Нормализуем источник доставки: NULL/пустое -> "Не указан"
         if r.get("Delivery.SourceKey") in (None, "", "null"):
             r["Delivery.SourceKey"] = "Не указан"
 
-        # Нормализуем тип заказа: NULL/пустое -> "Не указан"
         if r.get("OrderType") in (None, "", "null"):
             r["OrderType"] = "Не указан"
 
@@ -173,8 +174,6 @@ def save_to_db(rows):
     conn.close()
 
     print(f"💾 Saved {len(rows)} rows to Neon.")
-
-# ============================================================
 
 def main():
     date_from, date_to = get_period()
