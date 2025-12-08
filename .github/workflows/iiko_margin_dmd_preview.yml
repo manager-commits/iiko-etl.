@@ -1,0 +1,44 @@
+name: iiko Margin DMD preview
+
+on:
+  # Ручной запуск с датами
+  workflow_dispatch:
+    inputs:
+      date_from:
+        description: 'Начало периода (YYYY-MM-DD)'
+        required: false
+      date_to:
+        description: 'Конец периода (YYYY-MM-DD)'
+        required: false
+
+jobs:
+  preview:
+    runs-on: ubuntu-latest
+
+    env:
+      # iiko
+      IIKO_BASE_URL: ${{ secrets.IIKO_BASE_URL }}
+      IIKO_LOGIN:     ${{ secrets.IIKO_LOGIN }}
+      IIKO_PASSWORD:  ${{ secrets.IIKO_PASSWORD }}
+
+      # Даты периода (опционально)
+      DATE_FROM: ${{ github.event.inputs.date_from }}
+      DATE_TO:   ${{ github.event.inputs.date_to }}
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run Margin DMD preview
+        run: |
+          python etl_iiko_margin_dmd_preview.py
