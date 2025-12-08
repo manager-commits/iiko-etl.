@@ -11,7 +11,7 @@ IIKO_BASE_URL = os.getenv("IIKO_BASE_URL", "").rstrip("/")
 IIKO_LOGIN = os.getenv("IIKO_LOGIN")
 IIKO_PASSWORD = os.getenv("IIKO_PASSWORD")
 
-# ID отчёта "Маржа ДМД" из айко
+# ID отчёта "Маржа ДМД" из айко (если понадобится отдельно)
 REPORT_ID = "a25f836a-e33a-4f34-85df-5bbd8c49573f"
 
 
@@ -86,8 +86,9 @@ def fetch_margin_dmd(token: str, date_from: dt.date, date_to: dt.date) -> dict:
             "ProductCostBase.ProductCost",
         ],
         "filters": {
-            # Операционный день (как в ТЗ: SessionID.OperDay)
-            "SessionID.OperDay": {
+            # В АПИ вместо SessionID.OperDay используем OpenDate.Typed,
+            # как в рабочем скрипте etl_iiko_t1_light.py
+            "OpenDate.Typed": {
                 "filterType": "DateRange",
                 "periodType": "CUSTOM",
                 "from": date_from.strftime("%Y-%m-%d"),
@@ -113,7 +114,8 @@ def fetch_margin_dmd(token: str, date_from: dt.date, date_to: dt.date) -> dict:
                 "values": ["NOT_DELETED"],  # Заказ не удален
             },
         },
-        # Если отчёт в айко завязан именно на ID, сюда можно добавить:
+        # При необходимости можно явно указывать reportId,
+        # если конфиг отчёта хранится в айко:
         # "reportId": REPORT_ID,
     }
 
