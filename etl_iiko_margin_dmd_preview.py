@@ -95,7 +95,7 @@ def fetch_margin_dmd(token: str, date_from: dt.date, date_to: dt.date) -> dict:
                 "to": date_to.strftime("%Y-%m-%d"),
                 "includeLow": True,
                 # По ТЗ includeHigh = False → [from, to)
-                "includeHigh": False,
+                "includeHigh": True,
             },
             "Storned": {
                 "filterType": "IncludeValues",
