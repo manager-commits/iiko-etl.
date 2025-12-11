@@ -1,13 +1,14 @@
 name: FOT Daily ETL
 
 on:
-  workflow_dispatch:
+  workflow_dispatch: {}
 
 jobs:
   etl:
     runs-on: ubuntu-latest
 
     env:
+      # Postgres (Neon)
       PG_HOST: ${{ secrets.PG_HOST }}
       PG_PORT: ${{ secrets.PG_PORT }}
       PG_DB: ${{ secrets.PG_DB }}
@@ -15,6 +16,7 @@ jobs:
       PG_PASSWORD: ${{ secrets.PG_PASSWORD }}
       PG_SSLMODE: ${{ secrets.PG_SSLMODE }}
 
+      # Google Sheets
       GOOGLE_SHEET_ID: ${{ secrets.GOOGLE_SHEET_ID }}
 
     steps:
@@ -33,7 +35,7 @@ jobs:
 
       - name: Prepare Google credentials
         run: |
-          echo '${{ secrets.GOOGLE_SERVICE_KEY }}' > google_service_key.json
+          echo '${{ secrets.GOOGLE_CREDENTIALS }}' > google_credentials.json
 
       - name: Run FOT Daily ETL
         run: |
