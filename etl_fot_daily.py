@@ -10,10 +10,8 @@ from oauth2client.service_account import ServiceAccountCredentials
 # Загружаем переменные окружения при локальном запуске
 load_dotenv()
 
-# ---- Настройки ----
-
-GOOGLE_SHEET_ID = os.getenv("GOOGLE_SHEET_ID")  # spreadsheetId из URL
-SHEET_NAME = "ФОТ"                              # имя листа
+GOOGLE_SHEET_ID = os.getenv("GOOGLE_SHEET_ID")
+SHEET_NAME = "ФОТ"  # имя листа
 
 def get_pg_connection():
     return psycopg2.connect(
@@ -26,28 +24,37 @@ def get_pg_connection():
     )
 
 def get_sheet():
+    """Авторизация по сервис-аккаунту и получение листа."""
     scope = ["https://www.googleapis.com/auth/spreadsheets.readonly"]
     creds = ServiceAccountCredentials.from_json_keyfile_name(
-        "google_service_key.json", scope
+        "google_credentials.json", scope
     )
     client = gspread.authorize(creds)
     return client.open_by_key(GOOGLE_SHEET_ID).worksheet(SHEET_NAME)
 
 def parse_date(value: str):
     """Парсим дату формата 01.11.2025 -> date."""
-    try:
-        return datetime.strptime(value.strip(), "%d.%m.%Y").date()
-    except Exception:
+    if not value:
         return None
+    value = value.strip()
+    for fmt in ("%d.%m.%Y", "%d.%m.%y"):
+        try:
+            return datetime.strptime(value, fmt).date()
+        except ValueError:
+            continue
+    return None
 
 def parse_num(value: str):
-    """Парсим русские числа с пробелами и запятой."""
+    """Парсим русские числа с пробелами и запятой, пустые -> 0."""
     if value is None:
         return 0
     value = str(value).strip()
     if not value:
         return 0
-    value = value.replace(" ", "").replace("\u00a0", "").replace(",", ".")
+    # убираем пробелы и неразрывные пробелы
+    value = value.replace(" ", "").replace("\u00a0", "")
+    # запятая как десятичный разделитель
+    value = value.replace(",", ".")
     try:
         return float(value)
     except Exception:
@@ -72,7 +79,7 @@ def load_fot_data():
     result = []
 
     for row in data_rows:
-        # Ожидаем минимум 8 колонок
+        # ожидаем минимум 8 колонок
         if len(row) < 8:
             continue
 
@@ -84,12 +91,12 @@ def load_fot_data():
             continue
 
         item = {
-            "oper_day": oper_day,
+            "department":     department,
+            "oper_day":       oper_day,
             "fot_povar":      parse_num(row[1]),
             "fot_kur":        parse_num(row[2]),
             "fot_ofis":       parse_num(row[3]),
             "fot_uborsh":     parse_num(row[4]),
-            "department":     department,
             "reklama_budget": parse_num(row[6]),
             "fot_reklamy":    parse_num(row[7]),
         }
@@ -131,19 +138,17 @@ def save_to_db(rows):
         )
         ON CONFLICT (department, oper_day)
         DO UPDATE SET
-            fot_povar       = EXCLUDED.fot_povar,
-            fot_kur         = EXCLUDED.fot_kur,
-            fot_ofис        = EXCLUDED.fot_ofис,
-            fot_uborsh      = EXCLUDED.fot_uborsh,
-            reklama_budget  = EXCLUDED.reklama_budget,
-            fot_reklamy     = EXCLUDED.fot_reklamy,
-            updated_at      = now();
+            fot_povar      = EXCLUDED.fot_povar,
+            fot_kur        = EXCLUDED.fot_kur,
+            fot_ofis       = EXCLUDED.fot_ofис,
+            fot_uborsh     = EXCLUDED.fot_uborsh,
+            reklama_budget = EXCLUDED.reklama_budget,
+            fot_reklamy    = EXCLUDED.fot_reklamy,
+            updated_at     = now();
     """
 
-    # опечатка в названии столбца (fot_ofис) можно поправить при необходимости,
-    # но будем считать, что в БД fot_ofис написано как fot_ofis
-
-    # заменим в запросе на корректное имя
+    # маленький фикс: в запросе выше специально поставил "fot_ofис" кириллицей,
+    # здесь заменяем на нормальное имя колонки, чтобы точно совпало
     query = query.replace("fot_ofис", "fot_ofis")
 
     for r in rows:
