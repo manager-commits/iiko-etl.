@@ -67,32 +67,32 @@ def fetch_margin(token, date_from, date_to, courier_only: bool):
     url = f"{IIKO_BASE_URL}/api/v2/reports/olap"
     params = {"key": token}
 
-   filters = {
-    "OpenDate.Typed": {
-        "filterType": "DateRange",
-        "periodType": "CUSTOM",
-        "from": date_from.strftime("%Y-%m-%d"),
-        "to": date_to.strftime("%Y-%m-%d"),
-        "includeLow": True,
-        "includeHigh": False,  # [from, to) – как в отчёте
-    },
-    "Storned": {
-        "filterType": "IncludeValues",
-        "values": ["FALSE"],
-    },
-    "DeletedWithWriteoff": {
-        "filterType": "IncludeValues",
-        "values": ["NOT_DELETED"],
-    },
-    "Department": {
-        "filterType": "IncludeValues",
-        "values": ["Авиагородок", "Домодедово"],
-    },
-    "OrderDeleted": {
-        "filterType": "IncludeValues",
-        "values": ["NOT_DELETED"],
-    },
-}
+    filters = {
+        "OpenDate.Typed": {
+            "filterType": "DateRange",
+            "periodType": "CUSTOM",
+            "from": date_from.strftime("%Y-%m-%d"),
+            "to": date_to.strftime("%Y-%m-%d"),
+            "includeLow": True,
+            "includeHigh": False,  # [from, to) – как в отчёте
+        },
+        "Storned": {
+            "filterType": "IncludeValues",
+            "values": ["FALSE"],
+        },
+        "DeletedWithWriteoff": {
+            "filterType": "IncludeValues",
+            "values": ["NOT_DELETED"],
+        },
+        "Department": {
+            "filterType": "IncludeValues",
+            "values": ["Авиагородок", "Домодедово"],
+        },
+        "OrderDeleted": {
+            "filterType": "IncludeValues",
+            "values": ["NOT_DELETED"],
+        },
+    }
 
     if courier_only:
         filters["Delivery.ServiceType"] = {
@@ -125,8 +125,8 @@ def fetch_margin(token, date_from, date_to, courier_only: bool):
     data = resp.json().get("data", [])
     print(f"✅ Получено строк ({label}): {len(data)}")
     return data
-
 # --- Запись в margin_iiko ---
+
 def upsert_margin(rows_all, rows_courier):
     print("💾 Обновляем таблицу margin_iiko...")
 
