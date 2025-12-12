@@ -3,7 +3,7 @@ name: ETL FOT Daily
 on:
   workflow_dispatch:
   schedule:
-    - cron: "0 4 * * *" # запуск каждый день в 07:00 (MSK)
+    - cron: "0 10 * * *" # запуск каждый день в 13:00 (MSK)
 
 jobs:
   etl:
