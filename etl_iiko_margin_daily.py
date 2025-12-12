@@ -212,16 +212,22 @@ def upsert_type_margin(conn, rows, delivery_type: str):
         raise ValueError(f"Unknown delivery_type: {delivery_type}")
 
     cur = conn.cursor()
+
+    # ВАЖНО: заполняем базовые поля нулями, чтобы не нарушать NOT NULL,
+    # а при конфликте обновляем только поля конкретного типа доставки.
     sql = f"""
         INSERT INTO margin_iiko (
             department,
             oper_day,
+            revenue,
+            discount,
+            product_cost,
             {revenue_field},
             {discount_field},
             {cost_field},
             updated_at
         )
-        VALUES (%s, %s, %s, %s, %s, now())
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, now())
         ON CONFLICT (department, oper_day)
         DO UPDATE SET
             {revenue_field} = EXCLUDED.{revenue_field},
@@ -236,6 +242,9 @@ def upsert_type_margin(conn, rows, delivery_type: str):
             (
                 r["department"],
                 r["oper_day"],
+                0.0,  # revenue (общая) — 0, если строки ALL не было
+                0.0,  # discount (общая)
+                0.0,  # product_cost (общая)
                 r["revenue"],
                 r["discount"],
                 r["product_cost"],
