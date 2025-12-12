@@ -3,7 +3,7 @@ name: ETL FOT Daily
 on:
   workflow_dispatch:
   schedule:
-    - cron: "0 4 * * *"   # запуск каждый день в 07:00 (MSK)
+    - cron: "0 4 * * *" # запуск каждый день в 07:00 (MSK)
 
 jobs:
   etl:
@@ -21,9 +21,14 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Prepare Google credentials
-        run: |
-          echo "${{ secrets.GOOGLE_CREDENTIALS }}" > ./credentials.json
-
       - name: Run FOT Daily ETL
+        env:
+          GOOGLE_SHEET_ID: ${{ secrets.GOOGLE_SHEET_ID }}
+          GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
+          PG_HOST: ${{ secrets.PG_HOST }}
+          PG_PORT: ${{ secrets.PG_PORT }}
+          PG_DB: ${{ secrets.PG_DB }}
+          PG_USER: ${{ secrets.PG_USER }}
+          PG_PASSWORD: ${{ secrets.PG_PASSWORD }}
+          PG_SSLMODE: ${{ secrets.PG_SSLMODE }}
         run: python etl_fot_daily.py
