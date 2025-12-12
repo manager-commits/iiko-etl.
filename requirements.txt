@@ -2,4 +2,4 @@ requests
 python-dotenv
 psycopg2-binary
 gspread
-oauth2client
+google-auth
