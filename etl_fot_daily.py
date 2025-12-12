@@ -1,11 +1,12 @@
 import os
+import json
 from datetime import datetime
 
 import psycopg2
 from dotenv import load_dotenv
 
 import gspread
-from oauth2client.service_account import ServiceAccountCredentials
+from google.oauth2.service_account import Credentials
 
 # Загружаем переменные окружения при локальном запуске
 load_dotenv()
@@ -13,6 +14,8 @@ load_dotenv()
 GOOGLE_SHEET_ID = os.getenv("GOOGLE_SHEET_ID")
 SHEET_NAME = "ФОТ"  # имя листа
 
+
+# --- Настройки Postgres (Neon) ---
 def get_pg_connection():
     return psycopg2.connect(
         host=os.getenv("PG_HOST"),
@@ -23,20 +26,35 @@ def get_pg_connection():
         sslmode=os.getenv("PG_SSLMODE", "require"),
     )
 
+
+# --- Google Sheets creds (Вариант 1: из секрета GOOGLE_CREDENTIALS) ---
 def get_sheet():
-    """Авторизация по сервис-аккаунту и получение листа."""
+    """Авторизация по сервис-аккаунту (JSON из env) и получение листа."""
+    if not GOOGLE_SHEET_ID:
+        raise RuntimeError("GOOGLE_SHEET_ID is not set")
+
+    raw = os.getenv("GOOGLE_CREDENTIALS")
+    if not raw:
+        raise RuntimeError(
+            "GOOGLE_CREDENTIALS is not set. Put full service account JSON into this secret/env var."
+        )
+
     scope = ["https://www.googleapis.com/auth/spreadsheets.readonly"]
-    creds = ServiceAccountCredentials.from_json_keyfile_name(
-        "google_credentials.json", scope
-    )
+
+    # В GitHub секрет часто вставляют как JSON строку — грузим его
+    info = json.loads(raw)
+
+    creds = Credentials.from_service_account_info(info, scopes=scope)
     client = gspread.authorize(creds)
+
     return client.open_by_key(GOOGLE_SHEET_ID).worksheet(SHEET_NAME)
+
 
 def parse_date(value: str):
     """Парсим дату формата 01.11.2025 -> date."""
     if not value:
         return None
-    value = value.strip()
+    value = str(value).strip()
     for fmt in ("%d.%m.%Y", "%d.%m.%y"):
         try:
             return datetime.strptime(value, fmt).date()
@@ -44,21 +62,21 @@ def parse_date(value: str):
             continue
     return None
 
+
 def parse_num(value: str):
     """Парсим русские числа с пробелами и запятой, пустые -> 0."""
     if value is None:
-        return 0
+        return 0.0
     value = str(value).strip()
     if not value:
-        return 0
-    # убираем пробелы и неразрывные пробелы
+        return 0.0
     value = value.replace(" ", "").replace("\u00a0", "")
-    # запятая как десятичный разделитель
     value = value.replace(",", ".")
     try:
         return float(value)
     except Exception:
-        return 0
+        return 0.0
+
 
 def load_fot_data():
     print("📄 Читаем Google Sheet 'ФОТ'...")
@@ -79,31 +97,39 @@ def load_fot_data():
     result = []
 
     for row in data_rows:
-        # ожидаем минимум 8 колонок
+        # ожидаем минимум 8 колонок:
+        # 0 Учетный день
+        # 1 ФОТ Повара
+        # 2 ФОТ Курьеры
+        # 3 ФОТ Офики
+        # 4 ФОТ Уборщицы
+        # 5 Торговое предприятие
+        # 6 Рекламный бюджет
+        # 7 ФОТ Рекламы
         if len(row) < 8:
             continue
 
         oper_day = parse_date(row[0])
-        department = row[5].strip() if len(row) > 5 else ""
+        department = (row[5] or "").strip()
 
         if not oper_day or not department:
-            # без даты или точки смысла нет
             continue
 
         item = {
-            "department":     department,
-            "oper_day":       oper_day,
-            "fot_povar":      parse_num(row[1]),
-            "fot_kur":        parse_num(row[2]),
-            "fot_ofis":       parse_num(row[3]),
-            "fot_uborsh":     parse_num(row[4]),
+            "department": department,
+            "oper_day": oper_day,
+            "fot_povar": parse_num(row[1]),
+            "fot_kur": parse_num(row[2]),
+            "fot_ofis": parse_num(row[3]),
+            "fot_uborsh": parse_num(row[4]),
             "reklama_budget": parse_num(row[6]),
-            "fot_reklamy":    parse_num(row[7]),
+            "fot_reklamy": parse_num(row[7]),
         }
         result.append(item)
 
     print(f"✅ Разобрано строк: {len(result)}")
     return result
+
 
 def save_to_db(rows):
     if not rows:
@@ -140,16 +166,12 @@ def save_to_db(rows):
         DO UPDATE SET
             fot_povar      = EXCLUDED.fot_povar,
             fot_kur        = EXCLUDED.fot_kur,
-            fot_ofis       = EXCLUDED.fot_ofис,
+            fot_ofis       = EXCLUDED.fot_ofis,
             fot_uborsh     = EXCLUDED.fot_uborsh,
             reklama_budget = EXCLUDED.reklama_budget,
             fot_reklamy    = EXCLUDED.fot_reklamy,
             updated_at     = now();
     """
-
-    # маленький фикс: в запросе выше специально поставил "fot_ofис" кириллицей,
-    # здесь заменяем на нормальное имя колонки, чтобы точно совпало
-    query = query.replace("fot_ofис", "fot_ofis")
 
     for r in rows:
         cur.execute(query, r)
@@ -160,9 +182,11 @@ def save_to_db(rows):
 
     print(f"💾 В fot_daily записано строк: {len(rows)}")
 
+
 def main():
     rows = load_fot_data()
     save_to_db(rows)
+
 
 if __name__ == "__main__":
     main()
