@@ -8,14 +8,13 @@ from dotenv import load_dotenv
 import gspread
 from google.oauth2.service_account import Credentials
 
-# Загружаем переменные окружения при локальном запуске
+# Локальный запуск: подтянуть .env (в Actions это не мешает)
 load_dotenv()
 
-GOOGLE_SHEET_ID = os.getenv("GOOGLE_SHEET_ID")
-SHEET_NAME = "ФОТ"  # имя листа
+SHEET_NAME = "ФОТ"
 
 
-# --- Настройки Postgres (Neon) ---
+# ---------- Postgres ----------
 def get_pg_connection():
     return psycopg2.connect(
         host=os.getenv("PG_HOST"),
@@ -27,31 +26,37 @@ def get_pg_connection():
     )
 
 
-# --- Google Sheets creds (Вариант 1: из секрета GOOGLE_CREDENTIALS) ---
-def get_sheet():
-    """Авторизация по сервис-аккаунту (JSON из env) и получение листа."""
-    if not GOOGLE_SHEET_ID:
-        raise RuntimeError("GOOGLE_SHEET_ID is not set")
+# ---------- Google Sheets (Вариант 1: creds из ENV GOOGLE_CREDENTIALS) ----------
+def get_sheet_id() -> str:
+    sheet_id = os.getenv("GOOGLE_SHEET_ID")
+    if not sheet_id:
+        raise RuntimeError("GOOGLE_SHEET_ID is not set (нужно добавить secret и пробросить в workflow env).")
+    return sheet_id.strip()
 
+
+def get_gspread_client():
     raw = os.getenv("GOOGLE_CREDENTIALS")
     if not raw:
-        raise RuntimeError(
-            "GOOGLE_CREDENTIALS is not set. Put full service account JSON into this secret/env var."
-        )
+        raise RuntimeError("GOOGLE_CREDENTIALS is not set (в secret должен быть JSON сервис-аккаунта).")
 
-    scope = ["https://www.googleapis.com/auth/spreadsheets.readonly"]
+    try:
+        info = json.loads(raw)
+    except json.JSONDecodeError as e:
+        raise RuntimeError(f"GOOGLE_CREDENTIALS is not valid JSON: {e}")
 
-    # В GitHub секрет часто вставляют как JSON строку — грузим его
-    info = json.loads(raw)
-
-    creds = Credentials.from_service_account_info(info, scopes=scope)
-    client = gspread.authorize(creds)
-
-    return client.open_by_key(GOOGLE_SHEET_ID).worksheet(SHEET_NAME)
+    scopes = ["https://www.googleapis.com/auth/spreadsheets.readonly"]
+    creds = Credentials.from_service_account_info(info, scopes=scopes)
+    return gspread.authorize(creds)
 
 
+def get_sheet():
+    client = get_gspread_client()
+    sheet_id = get_sheet_id()
+    return client.open_by_key(sheet_id).worksheet(SHEET_NAME)
+
+
+# ---------- Парсинг ----------
 def parse_date(value: str):
-    """Парсим дату формата 01.11.2025 -> date."""
     if not value:
         return None
     value = str(value).strip()
@@ -59,25 +64,24 @@ def parse_date(value: str):
         try:
             return datetime.strptime(value, fmt).date()
         except ValueError:
-            continue
+            pass
     return None
 
 
-def parse_num(value: str):
-    """Парсим русские числа с пробелами и запятой, пустые -> 0."""
+def parse_num(value):
     if value is None:
         return 0.0
     value = str(value).strip()
     if not value:
         return 0.0
-    value = value.replace(" ", "").replace("\u00a0", "")
-    value = value.replace(",", ".")
+    value = value.replace(" ", "").replace("\u00a0", "").replace(",", ".")
     try:
         return float(value)
     except Exception:
         return 0.0
 
 
+# ---------- Extract ----------
 def load_fot_data():
     print("📄 Читаем Google Sheet 'ФОТ'...")
 
@@ -110,27 +114,29 @@ def load_fot_data():
             continue
 
         oper_day = parse_date(row[0])
-        department = (row[5] or "").strip()
+        department = row[5].strip() if row[5] else ""
 
         if not oper_day or not department:
             continue
 
-        item = {
-            "department": department,
-            "oper_day": oper_day,
-            "fot_povar": parse_num(row[1]),
-            "fot_kur": parse_num(row[2]),
-            "fot_ofis": parse_num(row[3]),
-            "fot_uborsh": parse_num(row[4]),
-            "reklama_budget": parse_num(row[6]),
-            "fot_reklamy": parse_num(row[7]),
-        }
-        result.append(item)
+        result.append(
+            {
+                "department": department,
+                "oper_day": oper_day,
+                "fot_povar": parse_num(row[1]),
+                "fot_kur": parse_num(row[2]),
+                "fot_ofis": parse_num(row[3]),
+                "fot_uborsh": parse_num(row[4]),
+                "reklama_budget": parse_num(row[6]),
+                "fot_reklamy": parse_num(row[7]),
+            }
+        )
 
     print(f"✅ Разобрано строк: {len(result)}")
     return result
 
 
+# ---------- Load ----------
 def save_to_db(rows):
     if not rows:
         print("⚠ Нет данных для записи")
