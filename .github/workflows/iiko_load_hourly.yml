@@ -1,0 +1,50 @@
+name: iiko Load Hourly ETL
+
+on:
+  workflow_dispatch:
+    inputs:
+      date_from:
+        description: "DATE_FROM (YYYY-MM-DD). Пусто = вчера"
+        required: false
+        default: ""
+      date_to:
+        description: "DATE_TO (YYYY-MM-DD). Пусто = сегодня"
+        required: false
+        default: ""
+  schedule:
+    # 06:00 MSK = 03:00 UTC
+    - cron: "0 3 * * *"
+
+jobs:
+  etl:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run iiko Load Hourly ETL
+        env:
+          IIKO_BASE_URL: ${{ secrets.IIKO_BASE_URL }}
+          IIKO_LOGIN: ${{ secrets.IIKO_LOGIN }}
+          IIKO_PASSWORD: ${{ secrets.IIKO_PASSWORD }}
+
+          PG_HOST: ${{ secrets.PG_HOST }}
+          PG_PORT: ${{ secrets.PG_PORT }}
+          PG_DB: ${{ secrets.PG_DB }}
+          PG_USER: ${{ secrets.PG_USER }}
+          PG_PASSWORD: ${{ secrets.PG_PASSWORD }}
+          PG_SSLMODE: ${{ secrets.PG_SSLMODE }}
+
+          # ручной ввод (если пусто — скрипт возьмет период по умолчанию: вчера -> сегодня)
+          DATE_FROM: ${{ inputs.date_from }}
+          DATE_TO: ${{ inputs.date_to }}
+        run: python etl_iiko_load_hourly.py
