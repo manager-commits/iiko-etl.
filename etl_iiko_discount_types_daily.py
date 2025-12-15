@@ -178,7 +178,14 @@ def upsert_discount_types(conn, rows):
     ]
 
     with conn.cursor() as cur:
-        execute_values(cur, sql, values, page_size=500)
+        execute_values(
+            cur,
+            sql,
+            values,
+            template="(%s,%s,%s,%s,%s,%s,now())",  # <-- ВОТ ФИКС
+            page_size=500,
+        )
+
     conn.commit()
     print(f"💾 Upsert'нуто строк: {len(rows)}")
 
