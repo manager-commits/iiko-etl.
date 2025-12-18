@@ -9,31 +9,13 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # --- Настройки iiko ---
-RAW_IIKO_BASE_URL = os.getenv("IIKO_BASE_URL", "").strip()
+IIKO_BASE_URL = os.getenv("IIKO_BASE_URL", "").rstrip("/")
 IIKO_LOGIN = os.getenv("IIKO_LOGIN")
 IIKO_PASSWORD = os.getenv("IIKO_PASSWORD")
 
+# Фильтры как в отчёте
 DEPARTMENTS = ["Авиагородок", "Домодедово"]
-PRODUCT_NUM_FILTER = ["00001"]  # как в отчёте
-
-
-def normalize_iiko_base_url(url: str) -> str:
-    """
-    Приводим базовый URL к виду .../resto (вариант А),
-    чтобы работали эндпоинты:
-      /resto/api/auth
-      /resto/api/logout
-      /resto/api/v2/reports/olap
-    """
-    url = (url or "").strip().rstrip("/")
-    if not url:
-        return ""
-    if not url.endswith("/resto"):
-        url = url + "/resto"
-    return url
-
-
-IIKO_BASE_URL = normalize_iiko_base_url(RAW_IIKO_BASE_URL)
+PRODUCT_NUM_FILTER = ["00001"]  # как в твоих параметрах отчёта
 
 # --- Настройки Postgres (Neon) ---
 def get_pg_connection():
@@ -45,7 +27,6 @@ def get_pg_connection():
         password=os.getenv("PG_PASSWORD"),
         sslmode=os.getenv("PG_SSLMODE", "require"),
     )
-
 
 # --- Токен iiko ---
 def get_token():
@@ -64,17 +45,14 @@ def get_token():
     print(f"🔑 Токен получен: {token[:6]}...")
     return token
 
-
 def logout(token: str):
-    if not token:
-        return
     url = f"{IIKO_BASE_URL}/api/logout"
     params = {"key": token}
     try:
         requests.post(url, params=params, timeout=10)
+        print("🔐 Logout выполнен")
     except Exception as e:
         print("⚠️ Ошибка при logout:", e)
-
 
 # --- Период выгрузки: вчера по умолчанию ---
 def get_period():
@@ -84,24 +62,22 @@ def get_period():
     if date_from_str and date_to_str:
         date_from = dt.date.fromisoformat(date_from_str)
         date_to = dt.date.fromisoformat(date_to_str)
-        print(f"📅 Используем период из ENV: {date_from} – {date_to}")
+        print(f"📅 Период из ENV: {date_from} – {date_to}")
         return date_from, date_to
 
     today = dt.date.today()
     date_from = today - dt.timedelta(days=1)
-    date_to = today  # правая граница, в iiko будет includeHigh=False
-    print(f"📅 Используем период по умолчанию: {date_from} – {date_to}")
+    date_to = today  # правая граница, includeHigh=False
+    print(f"📅 Период по умолчанию (вчера): {date_from} – {date_to}")
     return date_from, date_to
 
-
-# --- OLAP: Отчет по проводкам (TRANSACTIONS) ---
-def fetch_stock_tx(token, date_from, date_to):
+# --- OLAP: "Отчет по проводкам" ---
+def fetch_stock_tx(token: str, date_from: dt.date, date_to: dt.date):
     print("📦 Загружаем OLAP 'Отчет по проводкам' из iiko...")
 
     url = f"{IIKO_BASE_URL}/api/v2/reports/olap"
     params = {"key": token}
 
-    # Фильтры строго по твоим параметрам
     filters = {
         "DateTime.OperDayFilter": {
             "filterType": "DateRange",
@@ -146,7 +122,7 @@ def fetch_stock_tx(token, date_from, date_to):
     rows = []
     for r in data.get("data", []):
         dep = r.get("Department")
-        oper_raw = r.get("DateTime.DateTyped")  # обычно строка с датой
+        oper_raw = r.get("DateTime.DateTyped")
         if not dep or not oper_raw:
             continue
 
@@ -167,20 +143,51 @@ def fetch_stock_tx(token, date_from, date_to):
         )
 
     print(f"✅ Получено строк из iiko: {len(rows)}")
-
     print("🔎 Первые 10 строк из iiko:")
     for i, x in enumerate(rows[:10], start=1):
         print(f"{i:02d}. {x}")
 
     return rows
 
+def aggregate_without_document(rows):
+    """
+    ВАЖНО:
+    Твой отчёт в iiko группируется по Document, но в таблице stock_tx_iiko
+    столбца document НЕТ (по ошибке в логах).
+    Чтобы не терять оборот, суммируем turnover по ключу без document.
+    """
+    agg = {}
+    for r in rows:
+        key = (
+            r["department"],
+            r["oper_day"],
+            r["product_num"],
+            r.get("product_name"),
+            r.get("product_type"),
+            r.get("measure_unit"),
+            r.get("transaction_type"),
+        )
+        if key not in agg:
+            agg[key] = {
+                "department": r["department"],
+                "oper_day": r["oper_day"],
+                "product_num": r["product_num"],
+                "product_name": r.get("product_name"),
+                "product_type": r.get("product_type"),
+                "measure_unit": r.get("measure_unit"),
+                "transaction_type": r.get("transaction_type"),
+                "turnover": 0.0,
+            }
+        agg[key]["turnover"] += float(r.get("turnover") or 0.0)
 
-# --- Запись в stock_tx_iiko ---
+    return list(agg.values())
+
 def upsert_stock_tx(conn, rows):
     if not rows:
-        print("⚠️ Нет строк для записи")
+        print("⚠️ Нет строк для записи в БД")
         return 0
 
+    # ВНИМАНИЕ: document здесь НЕТ — потому что в таблице его нет
     sql = """
         INSERT INTO stock_tx_iiko (
             department,
@@ -189,13 +196,12 @@ def upsert_stock_tx(conn, rows):
             product_name,
             product_type,
             measure_unit,
-            document,
             transaction_type,
             turnover,
             updated_at
         )
         VALUES %s
-        ON CONFLICT (department, oper_day, product_num, document, transaction_type)
+        ON CONFLICT (department, oper_day, product_num, transaction_type)
         DO UPDATE SET
             product_name = EXCLUDED.product_name,
             product_type = EXCLUDED.product_type,
@@ -212,7 +218,6 @@ def upsert_stock_tx(conn, rows):
             r["product_name"],
             r["product_type"],
             r["measure_unit"],
-            r["document"],
             r["transaction_type"],
             r["turnover"],
         )
@@ -224,31 +229,30 @@ def upsert_stock_tx(conn, rows):
             cur,
             sql,
             values,
-            template="(%s,%s,%s,%s,%s,%s,%s,%s,%s,now())",
+            template="(%s,%s,%s,%s,%s,%s,%s,%s,now())",
             page_size=500,
         )
-
     conn.commit()
     return len(rows)
 
-
-def print_db_sample(conn, date_from, date_to):
+def print_db_sample(conn, date_from: dt.date, date_to: dt.date):
     print("🗄️ Первые 10 строк из БД за период:")
     q = """
-        SELECT department, oper_day, product_num, product_name, document, transaction_type, turnover
+        SELECT
+            department, oper_day, product_num, transaction_type,
+            product_name, product_type, measure_unit, turnover
         FROM stock_tx_iiko
         WHERE oper_day >= %s AND oper_day < %s
-        ORDER BY oper_day, department, product_num, document, transaction_type
+        ORDER BY oper_day, department, product_num, transaction_type
         LIMIT 10;
     """
     with conn.cursor() as cur:
         cur.execute(q, (date_from, date_to))
         rows = cur.fetchall()
-        for i, r in enumerate(rows, start=1):
-            print(f"{i:02d}. {r}")
 
+    for i, r in enumerate(rows, start=1):
+        print(f"{i:02d}. {r}")
 
-# --- Основной процесс ---
 def main():
     date_from, date_to = get_period()
     print(f"🚀 ETL STOCK TX: {date_from} – {date_to}")
@@ -256,7 +260,11 @@ def main():
 
     token = get_token()
     try:
-        rows = fetch_stock_tx(token, date_from, date_to)
+        raw_rows = fetch_stock_tx(token, date_from, date_to)
+
+        # агрегируем, потому что document в таблице нет
+        rows = aggregate_without_document(raw_rows)
+        print(f"🧮 После агрегации (без document): {len(rows)} строк")
 
         conn = get_pg_connection()
         try:
@@ -266,11 +274,8 @@ def main():
         finally:
             conn.close()
             print("🔌 Соединение с Postgres закрыто")
-
     finally:
         logout(token)
-        print("🔐 Logout выполнен")
-
 
 if __name__ == "__main__":
     main()
