@@ -8,8 +8,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # --- Настройки iiko ---
-RAW_IIKO_BASE_URL = (os.getenv("IIKO_BASE_URL") or "").strip()
-
+IIKO_BASE_URL = os.getenv("IIKO_BASE_URL", "").rstrip("/")
 IIKO_LOGIN = os.getenv("IIKO_LOGIN")
 IIKO_PASSWORD = os.getenv("IIKO_PASSWORD")
 
