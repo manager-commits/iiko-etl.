@@ -5,10 +5,11 @@ import psycopg2
 from psycopg2.extras import execute_values
 from dotenv import load_dotenv
 
+# Загружаем .env (локально) / переменные окружения (в GitHub)
 load_dotenv()
 
 # --- Настройки iiko ---
-RAW_IIKO_BASE_URL = (os.getenv("IIKO_BASE_URL") or "").strip()
+RAW_IIKO_BASE_URL = os.getenv("IIKO_BASE_URL", "").strip()
 IIKO_LOGIN = os.getenv("IIKO_LOGIN")
 IIKO_PASSWORD = os.getenv("IIKO_PASSWORD")
 
@@ -16,25 +17,23 @@ DEPARTMENTS = ["Авиагородок", "Домодедово"]
 PRODUCT_NUM_FILTER = ["00001"]  # как в отчёте
 
 
-def normalize_base_url(url: str) -> str:
+def normalize_iiko_base_url(url: str) -> str:
     """
-    Вариант А:
-    Приводим базовый URL к виду https://xxx.iiko.it/resto
-    чтобы работали:
+    Приводим базовый URL к виду .../resto (вариант А),
+    чтобы работали эндпоинты:
       /resto/api/auth
       /resto/api/logout
       /resto/api/v2/reports/olap
     """
     url = (url or "").strip().rstrip("/")
     if not url:
-        return url
+        return ""
     if not url.endswith("/resto"):
         url = url + "/resto"
     return url
 
 
-IIKO_BASE_URL = normalize_base_url(RAW_IIKO_BASE_URL)
-
+IIKO_BASE_URL = normalize_iiko_base_url(RAW_IIKO_BASE_URL)
 
 # --- Настройки Postgres (Neon) ---
 def get_pg_connection():
@@ -49,7 +48,7 @@ def get_pg_connection():
 
 
 # --- Токен iiko ---
-def get_token() -> str:
+def get_token():
     if not IIKO_BASE_URL:
         raise RuntimeError("IIKO_BASE_URL is not set")
     if not IIKO_LOGIN or not IIKO_PASSWORD:
@@ -69,10 +68,10 @@ def get_token() -> str:
 def logout(token: str):
     if not token:
         return
+    url = f"{IIKO_BASE_URL}/api/logout"
+    params = {"key": token}
     try:
-        url = f"{IIKO_BASE_URL}/api/logout"
-        requests.post(url, params={"key": token}, timeout=10)
-        print("🔐 Logout выполнен")
+        requests.post(url, params=params, timeout=10)
     except Exception as e:
         print("⚠️ Ошибка при logout:", e)
 
@@ -85,23 +84,24 @@ def get_period():
     if date_from_str and date_to_str:
         date_from = dt.date.fromisoformat(date_from_str)
         date_to = dt.date.fromisoformat(date_to_str)
-        print(f"📅 Период из ENV: {date_from} – {date_to}")
+        print(f"📅 Используем период из ENV: {date_from} – {date_to}")
         return date_from, date_to
 
     today = dt.date.today()
     date_from = today - dt.timedelta(days=1)
-    date_to = today
-    print(f"📅 Период по умолчанию (вчера): {date_from} – {date_to}")
+    date_to = today  # правая граница, в iiko будет includeHigh=False
+    print(f"📅 Используем период по умолчанию: {date_from} – {date_to}")
     return date_from, date_to
 
 
-# --- Забираем OLAP "Отчет по проводкам" ---
-def fetch_stock_tx(token: str, date_from: dt.date, date_to: dt.date):
-    print("📦 Загружаем OLAP 'Проводки по заготовкам' из iiko...")
+# --- OLAP: Отчет по проводкам (TRANSACTIONS) ---
+def fetch_stock_tx(token, date_from, date_to):
+    print("📦 Загружаем OLAP 'Отчет по проводкам' из iiko...")
 
     url = f"{IIKO_BASE_URL}/api/v2/reports/olap"
     params = {"key": token}
 
+    # Фильтры строго по твоим параметрам
     filters = {
         "DateTime.OperDayFilter": {
             "filterType": "DateRange",
@@ -145,12 +145,16 @@ def fetch_stock_tx(token: str, date_from: dt.date, date_to: dt.date):
 
     rows = []
     for r in data.get("data", []):
-        oper_raw = r.get("DateTime.DateTyped")
+        dep = r.get("Department")
+        oper_raw = r.get("DateTime.DateTyped")  # обычно строка с датой
+        if not dep or not oper_raw:
+            continue
+
         oper_day = oper_raw[:10] if isinstance(oper_raw, str) else oper_raw
 
         rows.append(
             {
-                "department": r.get("Department"),
+                "department": dep,
                 "oper_day": oper_day,
                 "product_num": r.get("Product.Num"),
                 "product_name": r.get("Product.Name"),
@@ -163,6 +167,7 @@ def fetch_stock_tx(token: str, date_from: dt.date, date_to: dt.date):
         )
 
     print(f"✅ Получено строк из iiko: {len(rows)}")
+
     print("🔎 Первые 10 строк из iiko:")
     for i, x in enumerate(rows[:10], start=1):
         print(f"{i:02d}. {x}")
@@ -170,9 +175,10 @@ def fetch_stock_tx(token: str, date_from: dt.date, date_to: dt.date):
     return rows
 
 
+# --- Запись в stock_tx_iiko ---
 def upsert_stock_tx(conn, rows):
     if not rows:
-        print("⚠️ Нет строк для записи в БД")
+        print("⚠️ Нет строк для записи")
         return 0
 
     sql = """
@@ -226,10 +232,10 @@ def upsert_stock_tx(conn, rows):
     return len(rows)
 
 
-def print_db_sample(conn, date_from: dt.date, date_to: dt.date):
+def print_db_sample(conn, date_from, date_to):
     print("🗄️ Первые 10 строк из БД за период:")
     q = """
-        SELECT department, oper_day, product_num, document, transaction_type, turnover
+        SELECT department, oper_day, product_num, product_name, document, transaction_type, turnover
         FROM stock_tx_iiko
         WHERE oper_day >= %s AND oper_day < %s
         ORDER BY oper_day, department, product_num, document, transaction_type
@@ -242,6 +248,7 @@ def print_db_sample(conn, date_from: dt.date, date_to: dt.date):
             print(f"{i:02d}. {r}")
 
 
+# --- Основной процесс ---
 def main():
     date_from, date_to = get_period()
     print(f"🚀 ETL STOCK TX: {date_from} – {date_to}")
@@ -259,8 +266,10 @@ def main():
         finally:
             conn.close()
             print("🔌 Соединение с Postgres закрыто")
+
     finally:
         logout(token)
+        print("🔐 Logout выполнен")
 
 
 if __name__ == "__main__":
