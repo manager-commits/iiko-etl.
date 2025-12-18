@@ -8,7 +8,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # --- Настройки iiko ---
-IIKO_BASE_URL = os.getenv("IIKO_BASE_URL", "").rstrip("/")
+RAW_IIKO_BASE_URL = (os.getenv("IIKO_BASE_URL") or "").strip()
 IIKO_LOGIN = os.getenv("IIKO_LOGIN")
 IIKO_PASSWORD = os.getenv("IIKO_PASSWORD")
 
@@ -18,13 +18,19 @@ PRODUCT_NUM_FILTER = ["00001"]  # как в отчёте
 
 def normalize_base_url(url: str) -> str:
     """
-    Приводим базовый URL к виду без хвоста /resto и без слэша в конце.
-    Потому что для OLAP и auth в твоих ETL используется /api/*
+    Вариант А:
+    Приводим базовый URL к виду https://xxx.iiko.it/resto
+    чтобы работали:
+      /resto/api/auth
+      /resto/api/logout
+      /resto/api/v2/reports/olap
     """
     url = (url or "").strip().rstrip("/")
-    if url.endswith("/resto"):
-        url = url[:-5]  # убрать "/resto"
-    return url.rstrip("/")
+    if not url:
+        return url
+    if not url.endswith("/resto"):
+        url = url + "/resto"
+    return url
 
 
 IIKO_BASE_URL = normalize_base_url(RAW_IIKO_BASE_URL)
@@ -96,7 +102,6 @@ def fetch_stock_tx(token: str, date_from: dt.date, date_to: dt.date):
     url = f"{IIKO_BASE_URL}/api/v2/reports/olap"
     params = {"key": token}
 
-    # Фильтры как в твоих параметрах (DateTime.OperDayFilter + Product.Num + Department)
     filters = {
         "DateTime.OperDayFilter": {
             "filterType": "DateRange",
@@ -158,7 +163,6 @@ def fetch_stock_tx(token: str, date_from: dt.date, date_to: dt.date):
         )
 
     print(f"✅ Получено строк из iiko: {len(rows)}")
-
     print("🔎 Первые 10 строк из iiko:")
     for i, x in enumerate(rows[:10], start=1):
         print(f"{i:02d}. {x}")
@@ -217,6 +221,7 @@ def upsert_stock_tx(conn, rows):
             template="(%s,%s,%s,%s,%s,%s,%s,%s,%s,now())",
             page_size=500,
         )
+
     conn.commit()
     return len(rows)
 
@@ -254,7 +259,6 @@ def main():
         finally:
             conn.close()
             print("🔌 Соединение с Postgres закрыто")
-
     finally:
         logout(token)
 
