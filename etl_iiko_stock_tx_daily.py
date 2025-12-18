@@ -8,28 +8,49 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # ========== iiko ==========
-RAW_IIKO_BASE_URL = os.getenv("IIKO_BASE_URL", "")
+IIKO_BASE_URL = (os.getenv("IIKO_BASE_URL", "") or "").strip().rstrip("/")
 IIKO_LOGIN = os.getenv("IIKO_LOGIN")
 IIKO_PASSWORD = os.getenv("IIKO_PASSWORD")
 
 DEPARTMENTS = ["Авиагородок", "Домодедово"]
-
-# Если фильтр по артикулу нужен — оставь; если нет — сделай [] или закомментируй блок фильтра ниже
-PRODUCT_NUM_FILTER = ["00001"]
+PRODUCT_NUM_FILTER = ["00001"]  # если не нужен — сделай []
 
 
-def normalize_base_url(url: str) -> str:
+# ---------- helpers for iiko urls ----------
+def _join(base: str, path: str) -> str:
+    return base.rstrip("/") + "/" + path.lstrip("/")
+
+
+def iiko_api_url(path: str, use_resto: bool) -> str:
     """
-    Приводим базовый URL к виду без хвоста /resto и без слэша в конце.
-    Для OLAP/auth/logout используем /api/*
+    use_resto=True  -> BASE/resto/<path>
+    use_resto=False -> BASE/<path>
     """
-    url = (url or "").strip().rstrip("/")
-    if url.endswith("/resto"):
-        url = url[:-5]
-    return url.rstrip("/")
+    base = IIKO_BASE_URL
+    if use_resto:
+        # если BASE уже заканчивается /resto — не дублируем
+        if base.endswith("/resto"):
+            return _join(base, path)
+        return _join(base, "/resto/" + path.lstrip("/"))
+    return _join(base, path)
 
 
-IIKO_BASE_URL = normalize_base_url(RAW_IIKO_BASE_URL)
+def request_with_resto_fallback(method: str, path: str, **kwargs):
+    """
+    Сначала пробуем BASE/<path>, если 404 — пробуем BASE/resto/<path>.
+    """
+    if not IIKO_BASE_URL:
+        raise RuntimeError("IIKO_BASE_URL is not set")
+
+    url1 = iiko_api_url(path, use_resto=False)
+    resp = requests.request(method, url1, **kwargs)
+
+    if resp.status_code == 404:
+        url2 = iiko_api_url(path, use_resto=True)
+        resp2 = requests.request(method, url2, **kwargs)
+        return resp2, url2
+
+    return resp, url1
 
 
 # ========== Postgres (Neon) ==========
@@ -42,33 +63,6 @@ def get_pg_connection():
         password=os.getenv("PG_PASSWORD"),
         sslmode=os.getenv("PG_SSLMODE", "require"),
     )
-
-
-# ========== Auth ==========
-def get_token() -> str:
-    if not IIKO_BASE_URL:
-        raise RuntimeError("IIKO_BASE_URL is not set")
-    if not IIKO_LOGIN or not IIKO_PASSWORD:
-        raise RuntimeError("IIKO_LOGIN / IIKO_PASSWORD is not set")
-
-    url = f"{IIKO_BASE_URL}/api/auth"
-    resp = requests.get(url, params={"login": IIKO_LOGIN, "pass": IIKO_PASSWORD}, timeout=30)
-    resp.raise_for_status()
-
-    token = resp.text.strip()
-    print(f"🔑 Токен получен: {token[:6]}...")
-    return token
-
-
-def logout(token: str):
-    if not token:
-        return
-    try:
-        url = f"{IIKO_BASE_URL}/api/logout"
-        requests.post(url, params={"key": token}, timeout=10)
-        print("🔐 Logout выполнен")
-    except Exception as e:
-        print("⚠️ Ошибка при logout:", e)
 
 
 # ========== Period ==========
@@ -89,37 +83,43 @@ def get_period():
     return date_from, date_to
 
 
-# ========== DB schema helpers ==========
-def get_table_columns(conn, table_name: str, schema: str = "public") -> set[str]:
-    q = """
-        SELECT column_name
-        FROM information_schema.columns
-        WHERE table_schema = %s AND table_name = %s;
-    """
-    with conn.cursor() as cur:
-        cur.execute(q, (schema, table_name))
-        return {r[0] for r in cur.fetchall()}
+# ========== Auth ==========
+def get_token() -> str:
+    if not IIKO_LOGIN or not IIKO_PASSWORD:
+        raise RuntimeError("IIKO_LOGIN / IIKO_PASSWORD is not set")
 
-
-def pick_turnover_column(cols: set[str]) -> str:
-    """
-    Какое имя колонки использовать под Amount.StoreInOutTyped.
-    Поддерживаем несколько вариантов, чтобы не падать из-за нейминга.
-    """
-    for cand in ("turnover", "store_in_out", "amount_store_in_out", "amount"):
-        if cand in cols:
-            return cand
-    raise RuntimeError(
-        "Не нашёл колонку под оборот. Ожидал одну из: turnover / store_in_out / amount_store_in_out / amount"
+    resp, used_url = request_with_resto_fallback(
+        "GET",
+        "/api/auth",
+        params={"login": IIKO_LOGIN, "pass": IIKO_PASSWORD},
+        timeout=30,
     )
+    print(f"🌐 AUTH URL: {used_url}")
+    resp.raise_for_status()
+
+    token = resp.text.strip()
+    print(f"🔑 Токен получен: {token[:6]}...")
+    return token
+
+
+def logout(token: str):
+    if not token:
+        return
+    try:
+        resp, used_url = request_with_resto_fallback(
+            "POST",
+            "/api/logout",
+            params={"key": token},
+            timeout=10,
+        )
+        print(f"🌐 LOGOUT URL: {used_url} ({resp.status_code})")
+    except Exception as e:
+        print("⚠️ Ошибка при logout:", e)
 
 
 # ========== iiko OLAP ==========
 def fetch_stock_tx(token: str, date_from: dt.date, date_to: dt.date):
     print("📦 Загружаем OLAP 'Отчет по проводкам' из iiko...")
-
-    url = f"{IIKO_BASE_URL}/api/v2/reports/olap"
-    params = {"key": token}
 
     filters = {
         "DateTime.OperDayFilter": {
@@ -136,7 +136,6 @@ def fetch_stock_tx(token: str, date_from: dt.date, date_to: dt.date):
         },
     }
 
-    # Фильтр по артикулу — только если задан
     if PRODUCT_NUM_FILTER:
         filters["Product.Num"] = {
             "filterType": "IncludeValues",
@@ -155,16 +154,21 @@ def fetch_stock_tx(token: str, date_from: dt.date, date_to: dt.date):
             "Document",
             "TransactionType",
         ],
-        "aggregateFields": [
-            "Amount.StoreInOutTyped",
-        ],
+        "aggregateFields": ["Amount.StoreInOutTyped"],
         "filters": filters,
     }
 
-    resp = requests.post(url, json=body, params=params, timeout=90)
+    resp, used_url = request_with_resto_fallback(
+        "POST",
+        "/api/v2/reports/olap",
+        params={"key": token},
+        json=body,
+        timeout=90,
+    )
+    print(f"🌐 OLAP URL: {used_url}")
     resp.raise_for_status()
-    data = resp.json()
 
+    data = resp.json()
     rows = []
     for r in data.get("data", []):
         oper_raw = r.get("DateTime.DateTyped")
@@ -192,13 +196,32 @@ def fetch_stock_tx(token: str, date_from: dt.date, date_to: dt.date):
     return rows
 
 
+# ========== DB schema helpers ==========
+def get_table_columns(conn, table_name: str, schema: str = "public") -> set[str]:
+    q = """
+        SELECT column_name
+        FROM information_schema.columns
+        WHERE table_schema = %s AND table_name = %s;
+    """
+    with conn.cursor() as cur:
+        cur.execute(q, (schema, table_name))
+        return {r[0] for r in cur.fetchall()}
+
+
+def pick_turnover_column(cols: set[str]) -> str:
+    for cand in ("turnover", "store_in_out", "amount_store_in_out", "amount"):
+        if cand in cols:
+            return cand
+    raise RuntimeError(
+        "Не нашёл колонку под оборот. Ожидал одну из: turnover / store_in_out / amount_store_in_out / amount"
+    )
+
+
 def aggregate_rows(rows: list[dict], with_document: bool) -> list[dict]:
-    """
-    Если в таблице нет document — агрегируем без него.
-    """
-    key_fields = ["department", "oper_day", "product_num", "product_name", "product_type", "measure_unit", "transaction_type"]
+    key_fields = ["department", "oper_day", "product_num", "product_name", "product_type", "measure_unit"]
     if with_document:
-        key_fields.insert(6, "document")  # перед transaction_type
+        key_fields.append("document")
+    key_fields.append("transaction_type")
 
     agg = {}
     for r in rows:
@@ -223,7 +246,6 @@ def upsert_stock_tx(conn, rows: list[dict]):
     has_document = "document" in cols
     turnover_col = pick_turnover_column(cols)
 
-    # Агрегация под схему таблицы
     rows = aggregate_rows(rows, with_document=has_document)
 
     insert_cols = [
@@ -236,15 +258,13 @@ def upsert_stock_tx(conn, rows: list[dict]):
     ]
     if has_document:
         insert_cols.append("document")
-    insert_cols.append("transaction_type")
-    insert_cols.append(turnover_col)
-    insert_cols.append("updated_at")
+    insert_cols += ["transaction_type", turnover_col, "updated_at"]
 
-    conflict_cols = ["department", "oper_day", "product_num", "transaction_type"]
+    conflict_cols = ["department", "oper_day", "product_num"]
     if has_document:
-        conflict_cols.insert(3, "document")  # department, oper_day, product_num, document, transaction_type
+        conflict_cols.append("document")
+    conflict_cols.append("transaction_type")
 
-    # VALUES
     values = []
     for r in rows:
         row_vals = [
@@ -261,31 +281,22 @@ def upsert_stock_tx(conn, rows: list[dict]):
         row_vals.append(float(r.get("turnover") or 0))
         values.append(tuple(row_vals))
 
-    cols_sql = ",\n            ".join(insert_cols)
+    cols_sql = ", ".join(insert_cols)
     conflict_sql = ", ".join(conflict_cols)
 
-    # Обновляем справочные поля + сумму
-    update_parts = [
-        "product_name = EXCLUDED.product_name",
-        "product_type = EXCLUDED.product_type",
-        "measure_unit = EXCLUDED.measure_unit",
-        f"{turnover_col} = EXCLUDED.{turnover_col}",
-        "updated_at = now()",
-    ]
-    update_sql = ",\n            ".join(update_parts)
-
     sql = f"""
-        INSERT INTO stock_tx_iiko (
-            {cols_sql}
-        )
+        INSERT INTO stock_tx_iiko ({cols_sql})
         VALUES %s
         ON CONFLICT ({conflict_sql})
         DO UPDATE SET
-            {update_sql};
+            product_name = EXCLUDED.product_name,
+            product_type = EXCLUDED.product_type,
+            measure_unit = EXCLUDED.measure_unit,
+            {turnover_col} = EXCLUDED.{turnover_col},
+            updated_at = now();
     """
 
-    # template: + now() в конце
-    placeholders = ["%s"] * (len(insert_cols) - 1)  # кроме updated_at
+    placeholders = ["%s"] * (len(insert_cols) - 1)
     template = "(" + ",".join(placeholders) + ",now())"
 
     with conn.cursor() as cur:
@@ -301,6 +312,7 @@ def print_db_sample(conn, date_from: dt.date, date_to: dt.date):
     turnover_col = pick_turnover_column(cols)
 
     print("🗄️ Первые 10 строк из БД за период:")
+
     select_cols = ["department", "oper_day", "product_num"]
     if has_document:
         select_cols.append("document")
