@@ -1,75 +1,124 @@
 import os
+import datetime as dt
 import requests
-from datetime import datetime, timedelta
+import psycopg2
+from psycopg2.extras import execute_values
 from dotenv import load_dotenv
-
-# =========================
-# ENV / CONFIG
-# =========================
 
 load_dotenv()
 
-IIKO_BASE_URL = os.getenv("IIKO_BASE_URL")
+# --- Настройки iiko ---
+RAW_IIKO_BASE_URL = (os.getenv("IIKO_BASE_URL") or "").strip()
+
 IIKO_LOGIN = os.getenv("IIKO_LOGIN")
 IIKO_PASSWORD = os.getenv("IIKO_PASSWORD")
 
-DATE_FROM = os.getenv("DATE_FROM")
-DATE_TO = os.getenv("DATE_TO")
-
 DEPARTMENTS = ["Авиагородок", "Домодедово"]
-PRODUCT_NUMS = ["00001"]
-
-# =========================
-# UTILS
-# =========================
-
-def parse_date_range():
-    if DATE_FROM and DATE_TO:
-        date_from = datetime.strptime(DATE_FROM, "%Y-%m-%d")
-        date_to = datetime.strptime(DATE_TO, "%Y-%m-%d")
-    else:
-        yesterday = datetime.now() - timedelta(days=1)
-        date_from = yesterday.replace(hour=0, minute=0, second=0)
-        date_to = date_from + timedelta(days=1)
-
-    print(f"📅 Период: {date_from.date()} → {date_to.date()}")
-    return date_from, date_to
+PRODUCT_NUM_FILTER = ["00001"]  # как в отчёте
 
 
-def print_sample(rows, n=10):
-    print(f"\n🧾 SAMPLE: первые {min(n, len(rows))} строк из {len(rows)}\n")
-    for i, r in enumerate(rows[:n], 1):
-        print(f"{i:02d}. {r}")
-    print("")
+def normalize_base_url(url: str) -> str:
+    """
+    Приводим базовый URL к виду без хвоста /resto и без слэша в конце.
+    Потому что для OLAP и auth в твоих ETL используется /api/*
+    """
+    url = (url or "").strip().rstrip("/")
+    if url.endswith("/resto"):
+        url = url[:-5]  # убрать "/resto"
+    return url.rstrip("/")
 
 
-# =========================
-# IIKO AUTH
-# =========================
+IIKO_BASE_URL = normalize_base_url(RAW_IIKO_BASE_URL)
 
-def get_token():
-    url = f"{IIKO_BASE_URL}/resto/api/auth"
-    r = requests.get(url, params={
-        "login": IIKO_LOGIN,
-        "password": IIKO_PASSWORD
-    })
-    r.raise_for_status()
-    token = r.text.strip()
-    print(f"🔐 Token получен: {token[:6]}***")
+
+# --- Настройки Postgres (Neon) ---
+def get_pg_connection():
+    return psycopg2.connect(
+        host=os.getenv("PG_HOST"),
+        port=os.getenv("PG_PORT"),
+        dbname=os.getenv("PG_DB"),
+        user=os.getenv("PG_USER"),
+        password=os.getenv("PG_PASSWORD"),
+        sslmode=os.getenv("PG_SSLMODE", "require"),
+    )
+
+
+# --- Токен iiko ---
+def get_token() -> str:
+    if not IIKO_BASE_URL:
+        raise RuntimeError("IIKO_BASE_URL is not set")
+    if not IIKO_LOGIN or not IIKO_PASSWORD:
+        raise RuntimeError("IIKO_LOGIN / IIKO_PASSWORD is not set")
+
+    url = f"{IIKO_BASE_URL}/api/auth"
+    params = {"login": IIKO_LOGIN, "pass": IIKO_PASSWORD}
+
+    resp = requests.get(url, params=params, timeout=30)
+    resp.raise_for_status()
+
+    token = resp.text.strip()
+    print(f"🔑 Токен получен: {token[:6]}...")
     return token
 
 
-# =========================
-# OLAP LOAD
-# =========================
+def logout(token: str):
+    if not token:
+        return
+    try:
+        url = f"{IIKO_BASE_URL}/api/logout"
+        requests.post(url, params={"key": token}, timeout=10)
+        print("🔐 Logout выполнен")
+    except Exception as e:
+        print("⚠️ Ошибка при logout:", e)
 
-def load_stock_transactions(token, date_from, date_to):
-    print("📊 Загружаем OLAP 'Отчет по проводкам' из iiko...")
 
-    url = f"{IIKO_BASE_URL}/resto/api/v2/reports/olap"
+# --- Период выгрузки: вчера по умолчанию ---
+def get_period():
+    date_from_str = os.getenv("DATE_FROM")
+    date_to_str = os.getenv("DATE_TO")
 
-    payload = {
-        "reportType": "SALES",
+    if date_from_str and date_to_str:
+        date_from = dt.date.fromisoformat(date_from_str)
+        date_to = dt.date.fromisoformat(date_to_str)
+        print(f"📅 Период из ENV: {date_from} – {date_to}")
+        return date_from, date_to
+
+    today = dt.date.today()
+    date_from = today - dt.timedelta(days=1)
+    date_to = today
+    print(f"📅 Период по умолчанию (вчера): {date_from} – {date_to}")
+    return date_from, date_to
+
+
+# --- Забираем OLAP "Отчет по проводкам" ---
+def fetch_stock_tx(token: str, date_from: dt.date, date_to: dt.date):
+    print("📦 Загружаем OLAP 'Проводки по заготовкам' из iiko...")
+
+    url = f"{IIKO_BASE_URL}/api/v2/reports/olap"
+    params = {"key": token}
+
+    # Фильтры как в твоих параметрах (DateTime.OperDayFilter + Product.Num + Department)
+    filters = {
+        "DateTime.OperDayFilter": {
+            "filterType": "DateRange",
+            "periodType": "CUSTOM",
+            "from": date_from.strftime("%Y-%m-%d"),
+            "to": date_to.strftime("%Y-%m-%d"),
+            "includeLow": True,
+            "includeHigh": False,
+        },
+        "Product.Num": {
+            "filterType": "IncludeValues",
+            "values": PRODUCT_NUM_FILTER,
+        },
+        "Department": {
+            "filterType": "IncludeValues",
+            "values": DEPARTMENTS,
+        },
+    }
+
+    body = {
+        "reportType": "TRANSACTIONS",
         "groupByRowFields": [
             "DateTime.DateTyped",
             "Product.Num",
@@ -78,74 +127,137 @@ def load_stock_transactions(token, date_from, date_to):
             "Product.Type",
             "Product.MeasureUnit",
             "Document",
-            "TransactionType"
+            "TransactionType",
         ],
         "aggregateFields": [
-            "Amount.StoreInOutTyped"
+            "Amount.StoreInOutTyped",
         ],
-        "filters": [
-            {
-                "field": "DateTime.OperDayFilter",
-                "filterType": "DateRange",
-                "from": date_from.isoformat(),
-                "to": date_to.isoformat(),
-                "includeLow": True,
-                "includeHigh": False
-            },
-            {
-                "field": "Product.Num",
-                "filterType": "IncludeValues",
-                "values": PRODUCT_NUMS
-            },
-            {
-                "field": "Department",
-                "filterType": "IncludeValues",
-                "values": DEPARTMENTS
-            }
-        ]
+        "filters": filters,
     }
 
-    r = requests.post(
-        url,
-        headers={"Authorization": f"Bearer {token}"},
-        json=payload,
-        timeout=120
-    )
-    r.raise_for_status()
+    resp = requests.post(url, json=body, params=params, timeout=90)
+    resp.raise_for_status()
+    data = resp.json()
 
-    data = r.json()
     rows = []
+    for r in data.get("data", []):
+        oper_raw = r.get("DateTime.DateTyped")
+        oper_day = oper_raw[:10] if isinstance(oper_raw, str) else oper_raw
 
-    for row in data.get("data", []):
-        rows.append({
-            "oper_day": row.get("DateTime.DateTyped"),
-            "product_num": row.get("Product.Num"),
-            "product_name": row.get("Product.Name"),
-            "department": row.get("Department"),
-            "product_type": row.get("Product.Type"),
-            "measure_unit": row.get("Product.MeasureUnit"),
-            "document": row.get("Document"),
-            "transaction_type": row.get("TransactionType"),
-            "turnover_amount": row.get("Amount.StoreInOutTyped"),
-        })
+        rows.append(
+            {
+                "department": r.get("Department"),
+                "oper_day": oper_day,
+                "product_num": r.get("Product.Num"),
+                "product_name": r.get("Product.Name"),
+                "product_type": r.get("Product.Type"),
+                "measure_unit": r.get("Product.MeasureUnit"),
+                "document": r.get("Document"),
+                "transaction_type": r.get("TransactionType"),
+                "turnover": float(r.get("Amount.StoreInOutTyped") or 0),
+            }
+        )
 
-    print(f"✅ Получено строк: {len(rows)}")
+    print(f"✅ Получено строк из iiko: {len(rows)}")
+
+    print("🔎 Первые 10 строк из iiko:")
+    for i, x in enumerate(rows[:10], start=1):
+        print(f"{i:02d}. {x}")
+
     return rows
 
 
-# =========================
-# MAIN
-# =========================
+def upsert_stock_tx(conn, rows):
+    if not rows:
+        print("⚠️ Нет строк для записи в БД")
+        return 0
+
+    sql = """
+        INSERT INTO stock_tx_iiko (
+            department,
+            oper_day,
+            product_num,
+            product_name,
+            product_type,
+            measure_unit,
+            document,
+            transaction_type,
+            turnover,
+            updated_at
+        )
+        VALUES %s
+        ON CONFLICT (department, oper_day, product_num, document, transaction_type)
+        DO UPDATE SET
+            product_name = EXCLUDED.product_name,
+            product_type = EXCLUDED.product_type,
+            measure_unit = EXCLUDED.measure_unit,
+            turnover = EXCLUDED.turnover,
+            updated_at = now();
+    """
+
+    values = [
+        (
+            r["department"],
+            r["oper_day"],
+            r["product_num"],
+            r["product_name"],
+            r["product_type"],
+            r["measure_unit"],
+            r["document"],
+            r["transaction_type"],
+            r["turnover"],
+        )
+        for r in rows
+    ]
+
+    with conn.cursor() as cur:
+        execute_values(
+            cur,
+            sql,
+            values,
+            template="(%s,%s,%s,%s,%s,%s,%s,%s,%s,now())",
+            page_size=500,
+        )
+    conn.commit()
+    return len(rows)
+
+
+def print_db_sample(conn, date_from: dt.date, date_to: dt.date):
+    print("🗄️ Первые 10 строк из БД за период:")
+    q = """
+        SELECT department, oper_day, product_num, document, transaction_type, turnover
+        FROM stock_tx_iiko
+        WHERE oper_day >= %s AND oper_day < %s
+        ORDER BY oper_day, department, product_num, document, transaction_type
+        LIMIT 10;
+    """
+    with conn.cursor() as cur:
+        cur.execute(q, (date_from, date_to))
+        rows = cur.fetchall()
+        for i, r in enumerate(rows, start=1):
+            print(f"{i:02d}. {r}")
+
 
 def main():
-    date_from, date_to = parse_date_range()
+    date_from, date_to = get_period()
+    print(f"🚀 ETL STOCK TX: {date_from} – {date_to}")
+    print(f"🌐 IIKO_BASE_URL: {IIKO_BASE_URL}")
+
     token = get_token()
-    rows = load_stock_transactions(token, date_from, date_to)
+    try:
+        rows = fetch_stock_tx(token, date_from, date_to)
 
-    # 🔥 ВАЖНО: печатаем первые 10 строк
-    print_sample(rows, n=10)
+        conn = get_pg_connection()
+        try:
+            n = upsert_stock_tx(conn, rows)
+            print(f"✅ В stock_tx_iiko upsert'нуто строк: {n}")
+            print_db_sample(conn, date_from, date_to)
+        finally:
+            conn.close()
+            print("🔌 Соединение с Postgres закрыто")
 
-    print("🚪 Logout выполнен")
+    finally:
+        logout(token)
 
 
 if __name__ == "__main__":
