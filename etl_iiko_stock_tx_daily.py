@@ -13,7 +13,7 @@ IIKO_LOGIN = os.getenv("IIKO_LOGIN")
 IIKO_PASSWORD = os.getenv("IIKO_PASSWORD")
 
 DEPARTMENTS = ["Авиагородок", "Домодедово"]
-PRODUCT_NUM_FILTER = ["00001"]  # если не нужен — сделай []
+PRODUCT_NUM_FILTER = ["00001", "00002", "00003"]  # если не нужен — сделай []
 
 
 # ---------- helpers for iiko urls ----------
