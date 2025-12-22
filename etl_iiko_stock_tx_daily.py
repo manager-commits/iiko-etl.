@@ -99,13 +99,17 @@ def get_period():
     if date_from_str and date_to_str:
         date_from = dt.date.fromisoformat(date_from_str)
         date_to = dt.date.fromisoformat(date_to_str)
-        print(f"📅 Период из ENV: {date_from} – {date_to}")
+        print(f"📅 Период из ENV: {date_from} — {date_to}")
         return date_from, date_to
 
+    # ===== НОВАЯ ЛОГИКА ПО УМОЛЧАНИЮ =====
+    LOOKBACK_DAYS = 7
+
     today = dt.date.today()
-    date_from = today - dt.timedelta(days=1)
+    date_from = today - dt.timedelta(days=LOOKBACK_DAYS)
     date_to = today
-    print(f"📅 Период по умолчанию (вчера): {date_from} – {date_to}")
+
+    print(f"📅 Период по умолчанию (последние {LOOKBACK_DAYS} дней): {date_from} — {date_to}")
     return date_from, date_to
 
 
