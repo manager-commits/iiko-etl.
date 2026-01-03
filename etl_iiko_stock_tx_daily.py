@@ -54,7 +54,6 @@ def iiko_api_url(path: str, use_resto: bool) -> str:
     """
     base = IIKO_BASE_URL
     if use_resto:
-        # если BASE уже заканчивается /resto — не дублируем
         if base.endswith("/resto"):
             return _join(base, path)
         return _join(base, "/resto/" + path.lstrip("/"))
@@ -102,8 +101,7 @@ def get_period():
         print(f"📅 Период из ENV: {date_from} — {date_to}")
         return date_from, date_to
 
-    # ===== НОВАЯ ЛОГИКА ПО УМОЛЧАНИЮ =====
-    LOOKBACK_DAYS = 7
+    LOOKBACK_DAYS = int(os.getenv("LOOKBACK_DAYS", "7"))
 
     today = dt.date.today()
     date_from = today - dt.timedelta(days=LOOKBACK_DAYS)
@@ -158,7 +156,7 @@ def fetch_stock_tx(token: str, date_from: dt.date, date_to: dt.date):
             "from": date_from.strftime("%Y-%m-%d"),
             "to": date_to.strftime("%Y-%m-%d"),
             "includeLow": True,
-            "includeHigh": False,
+            "includeHigh": False,  # ВАЖНО: верхняя граница НЕ включается (oper_day < date_to)
         },
         "Department": {
             "filterType": "IncludeValues",
@@ -362,6 +360,42 @@ def print_db_sample(conn, date_from: dt.date, date_to: dt.date):
             print(f"{i:02d}. {r}")
 
 
+# ========== Refresh DataLens vitrine ==========
+def refresh_datalens_tail(conn, date_from: dt.date, date_to: dt.date):
+    """
+    Пересчитываем витрину batch_daily_lifecycle сразу после загрузки stock_tx_iiko.
+
+    В OLAP у нас oper_day в диапазоне: date_from <= oper_day < date_to
+    Для snapshot_day это означает: date_from .. (date_to - 1) включительно.
+    """
+    snapshot_from = date_from
+    snapshot_to = date_to - dt.timedelta(days=1)
+
+    if snapshot_to < snapshot_from:
+        print("⚠️ Период слишком короткий для пересчёта витрины, пропускаю")
+        return
+
+    print(f"🧮 Пересчёт витрины batch_daily_lifecycle: {snapshot_from} — {snapshot_to}")
+
+    with conn.cursor() as cur:
+        # 1) Пробуем пересчёт по диапазону, если процедура есть
+        try:
+            cur.execute("CALL public.refresh_batch_daily_lifecycle_range(%s, %s);", (snapshot_from, snapshot_to))
+            conn.commit()
+            print("✅ Витрина пересчитана через refresh_batch_daily_lifecycle_range")
+            return
+        except Exception as e:
+            conn.rollback()
+            print("⚠️ Не удалось вызвать refresh_batch_daily_lifecycle_range, пробую fallback:", str(e)[:300])
+
+        # 2) Fallback: пересчёт “хвоста” по p_days
+        # Берём количество дней так, чтобы покрыть snapshot_from..snapshot_to включительно
+        p_days = (snapshot_to - snapshot_from).days + 1
+        cur.execute("CALL public.refresh_batch_daily_lifecycle(%s);", (p_days,))
+        conn.commit()
+        print(f"✅ Витрина пересчитана через refresh_batch_daily_lifecycle(p_days => {p_days})")
+
+
 def main():
     date_from, date_to = get_period()
     print(f"🚀 ETL STOCK TX: {date_from} – {date_to}")
@@ -376,6 +410,10 @@ def main():
             n = upsert_stock_tx(conn, rows)
             print(f"✅ В stock_tx_iiko upsert'нуто строк: {n}")
             print_db_sample(conn, date_from, date_to)
+
+            # ✅ ВАЖНО: сразу после ETL обновляем витрину для DataLens
+            refresh_datalens_tail(conn, date_from, date_to)
+
         finally:
             conn.close()
             print("🔌 Соединение с Postgres закрыто")
