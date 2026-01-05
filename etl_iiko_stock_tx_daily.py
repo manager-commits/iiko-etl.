@@ -287,7 +287,14 @@ def upsert_stock_tx(conn, rows: list[dict]):
     has_document = "document" in cols
     turnover_col = pick_turnover_column(cols)
 
-    rows = aggregate_rows(rows, with_document=has_document)
+    if not has_document:
+        raise RuntimeError("В stock_tx_iiko нет колонки document — текущая стратегия уникальности невозможна")
+
+    rows = aggregate_rows(rows, with_document=True)
+
+    # Разделяем потоки: с документом и без документа
+    rows_with_doc = [r for r in rows if r.get("document") not in (None, "")]
+    rows_no_doc = [r for r in rows if r.get("document") in (None, "")]
 
     insert_cols = [
         "department",
@@ -296,55 +303,100 @@ def upsert_stock_tx(conn, rows: list[dict]):
         "product_name",
         "product_type",
         "measure_unit",
+        "document",
+        "transaction_type",
+        turnover_col,
+        "updated_at",
     ]
-    if has_document:
-        insert_cols.append("document")
-    insert_cols += ["transaction_type", turnover_col, "updated_at"]
-
-    conflict_cols = ["department", "oper_day", "product_num"]
-    if has_document:
-        conflict_cols.append("document")
-    conflict_cols.append("transaction_type")
-
-    values = []
-    for r in rows:
-        row_vals = [
-            r.get("department"),
-            r.get("oper_day"),
-            r.get("product_num"),
-            r.get("product_name"),
-            r.get("product_type"),
-            r.get("measure_unit"),
-        ]
-        if has_document:
-            row_vals.append(r.get("document"))
-        row_vals.append(r.get("transaction_type"))
-        row_vals.append(float(r.get("turnover") or 0))
-        values.append(tuple(row_vals))
-
     cols_sql = ", ".join(insert_cols)
-    conflict_sql = ", ".join(conflict_cols)
-
-    sql = f"""
-        INSERT INTO stock_tx_iiko ({cols_sql})
-        VALUES %s
-        ON CONFLICT ({conflict_sql})
-        DO UPDATE SET
-            product_name = EXCLUDED.product_name,
-            product_type = EXCLUDED.product_type,
-            measure_unit = EXCLUDED.measure_unit,
-            {turnover_col} = EXCLUDED.{turnover_col},
-            updated_at = now();
-    """
 
     placeholders = ["%s"] * (len(insert_cols) - 1)
     template = "(" + ",".join(placeholders) + ",now())"
 
-    with conn.cursor() as cur:
-        execute_values(cur, sql, values, template=template, page_size=500)
+    total_written = 0
 
-    conn.commit()
-    return len(values)
+    # ---------- 1) UPSERT для строк С документом ----------
+    # ВАЖНО:
+    # - конфликт таргет: (department, product_num, document, transaction_type) WHERE document IS NOT NULL
+    # - при апдейте обновляем oper_day (документ мог "переехать" на другую дату)
+    if rows_with_doc:
+        values = []
+        for r in rows_with_doc:
+            values.append(
+                (
+                    r.get("department"),
+                    r.get("oper_day"),
+                    r.get("product_num"),
+                    r.get("product_name"),
+                    r.get("product_type"),
+                    r.get("measure_unit"),
+                    r.get("document"),
+                    r.get("transaction_type"),
+                    float(r.get("turnover") or 0),
+                )
+            )
+
+        sql_with_doc = f"""
+            INSERT INTO stock_tx_iiko ({cols_sql})
+            VALUES %s
+            ON CONFLICT (department, product_num, document, transaction_type)
+            WHERE document IS NOT NULL
+            DO UPDATE SET
+                oper_day = EXCLUDED.oper_day,
+                product_name = EXCLUDED.product_name,
+                product_type = EXCLUDED.product_type,
+                measure_unit = EXCLUDED.measure_unit,
+                {turnover_col} = EXCLUDED.{turnover_col},
+                updated_at = now();
+        """
+
+        with conn.cursor() as cur:
+            execute_values(cur, sql_with_doc, values, template=template, page_size=500)
+
+        conn.commit()
+        total_written += len(values)
+        print(f"✅ upsert (by doc key) записано: {len(values)}")
+
+    # ---------- 2) UPSERT для строк БЕЗ документа ----------
+    # Тут оставляем “старую” привязку к oper_day, потому что документ = NULL (уникализировать нечем)
+    if rows_no_doc:
+        values = []
+        for r in rows_no_doc:
+            # document кладём как None
+            values.append(
+                (
+                    r.get("department"),
+                    r.get("oper_day"),
+                    r.get("product_num"),
+                    r.get("product_name"),
+                    r.get("product_type"),
+                    r.get("measure_unit"),
+                    None,
+                    r.get("transaction_type"),
+                    float(r.get("turnover") or 0),
+                )
+            )
+
+        sql_no_doc = f"""
+            INSERT INTO stock_tx_iiko ({cols_sql})
+            VALUES %s
+            ON CONFLICT (department, oper_day, product_num, document, transaction_type)
+            DO UPDATE SET
+                product_name = EXCLUDED.product_name,
+                product_type = EXCLUDED.product_type,
+                measure_unit = EXCLUDED.measure_unit,
+                {turnover_col} = EXCLUDED.{turnover_col},
+                updated_at = now();
+        """
+
+        with conn.cursor() as cur:
+            execute_values(cur, sql_no_doc, values, template=template, page_size=500)
+
+        conn.commit()
+        total_written += len(values)
+        print(f"✅ upsert (by day key, doc=NULL) записано: {len(values)}")
+
+    return total_written
 
 
 def print_db_sample(conn, date_from: dt.date, date_to: dt.date):
