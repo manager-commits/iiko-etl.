@@ -485,239 +485,131 @@ def refresh_datalens_tail(conn, date_from: dt.date, date_to: dt.date):
 # ========== Refresh anchor diffs (Plan/Fact discrepancies) ==========
 def refresh_anchor_discrepancies(conn):
     """
-    ВАЖНОЕ ПОВЕДЕНИЕ (как ты просишь):
-    - таблицы расхождений ПОЛНОСТЬЮ пересобираются каждый запуск ETL
-    - если якоря удалили/изменили -> расхождения исчезают/меняются сразу
-    - если якорей нет -> таблицы расхождений становятся пустыми (а не “залипают” со старыми значениями)
+    Итоговое поведение:
+    - пересобираем ТОЛЬКО public.batch_anchor_diff (детализация по партиям)
+    - список товаров берём из инвенты (batch_manual_anchor),
+      а партии (production_day) показываем ВСЕ из batch_daily_lifecycle по этим товарам на anchor_day
+    - если якорей нет -> batch_anchor_diff будет пустой
     """
 
-    # Если таблиц ещё нет — ничего не делаем (но ETL не падает).
+    # таблицы-источники
     if not table_exists(conn, "batch_manual_anchor", "public"):
         print("ℹ️ batch_manual_anchor не существует — пропускаю пересчёт расхождений")
         return
     if not table_exists(conn, "batch_anchor_diff", "public"):
         print("ℹ️ batch_anchor_diff не существует — пропускаю пересчёт расхождений")
         return
-    if not table_exists(conn, "batch_anchor_diff_total", "public"):
-        print("ℹ️ batch_anchor_diff_total не существует — пропускаю пересчёт расхождений")
-        return
     if not table_exists(conn, "batch_daily_lifecycle", "public"):
         print("ℹ️ batch_daily_lifecycle не существует — пропускаю пересчёт расхождений")
         return
 
-    diff_cols = get_table_columns(conn, "batch_anchor_diff", "public")
-    total_cols = get_table_columns(conn, "batch_anchor_diff_total", "public")
-
-    # Соберём INSERT-колонки максимально “гибко” (не ломаемся, если у тебя немного другое имя поля)
-    # Источник:
-    #   fact:  public.batch_manual_anchor (qty_fact)
-    #   plan:  public.batch_daily_lifecycle (qty_closing на anchor_day по production_day)
-    # diff = fact - plan
-    def pick_one(cols: set[str], variants: list[str], required: bool = False) -> str | None:
-        for v in variants:
-            if v in cols:
-                return v
-        if required:
-            raise RuntimeError(f"Не нашёл обязательную колонку среди {variants}. Есть: {sorted(cols)}")
-        return None
-
-    # batch_anchor_diff columns (варианты на всякий)
-    c_department = pick_one(diff_cols, ["department"], required=True)
-    c_product_num = pick_one(diff_cols, ["product_num"], required=True)
-    c_product_name = pick_one(diff_cols, ["product_name"])
-    c_anchor_day = pick_one(diff_cols, ["anchor_day"], required=True)
-    c_production_day = pick_one(diff_cols, ["production_day"], required=True)
-
-    c_qty_fact = pick_one(diff_cols, ["qty_fact", "fact_qty"], required=True)
-    c_qty_plan = pick_one(diff_cols, ["qty_plan", "plan_qty", "qty_planned"])
-    c_diff_qty = pick_one(diff_cols, ["diff_qty", "qty_diff", "delta_qty"])
-
-    c_batch_status = pick_one(diff_cols, ["batch_status", "status"])
-    c_qty_closing = pick_one(diff_cols, ["qty_closing"])  # если вдруг решили хранить plan тут же
-    c_qty_opening = pick_one(diff_cols, ["qty_opening"])
-    c_created_at = pick_one(diff_cols, ["created_at"])
-    c_updated_at = pick_one(diff_cols, ["updated_at"])
-
-    # batch_anchor_diff_total columns
-    tc_department = pick_one(total_cols, ["department"], required=True)
-    tc_product_num = pick_one(total_cols, ["product_num"], required=True)
-    tc_product_name = pick_one(total_cols, ["product_name"])
-    tc_anchor_day = pick_one(total_cols, ["anchor_day"], required=True)
-
-    tc_qty_fact = pick_one(total_cols, ["qty_fact_total", "qty_fact", "fact_qty_total", "fact_qty"])
-    tc_qty_plan = pick_one(total_cols, ["qty_plan_total", "qty_plan", "plan_qty_total", "plan_qty"])
-    tc_diff_qty = pick_one(total_cols, ["diff_qty_total", "diff_qty", "qty_diff_total", "qty_diff", "delta_qty_total", "delta_qty"])
-    tc_created_at = pick_one(total_cols, ["created_at"])
-    tc_updated_at = pick_one(total_cols, ["updated_at"])
-
-    print("🧩 Пересчёт таблиц расхождений (Plan/Fact) по якорям...")
+    print("🧩 Пересчёт таблицы расхождений (detail) по якорям...")
 
     with conn.cursor() as cur:
-        # 0) Полностью очищаем таблицы расхождений — это ключ к твоему требованию “убрал якоря -> всё исчезло”
+        # 0) очищаем detail
         try:
             cur.execute("TRUNCATE TABLE public.batch_anchor_diff;")
-            cur.execute("TRUNCATE TABLE public.batch_anchor_diff_total;")
             conn.commit()
         except Exception as e:
             conn.rollback()
-            raise RuntimeError(f"Не смог TRUNCATE таблицы расхождений: {e}")
+            raise RuntimeError(f"Не смог TRUNCATE public.batch_anchor_diff: {e}")
 
-        # 1) Если якорей нет — оставляем таблицы пустыми и выходим
+        # 1) если якорей нет — оставляем пустой
         cur.execute("SELECT COUNT(*) FROM public.batch_manual_anchor;")
         anchors_cnt = int(cur.fetchone()[0])
         if anchors_cnt == 0:
             conn.commit()
-            print("✅ Якорей нет — таблицы расхождений оставлены пустыми")
+            print("✅ Якорей нет — batch_anchor_diff оставлена пустой")
             return
 
-        # 2) Собираем detail-расхождения
-        # plan берём из batch_daily_lifecycle: qty_closing на snapshot_day=anchor_day
-        # Если строки в lifecycle нет — считаем план = 0 (иначе будет NULL и расчёт ломается)
-        insert_cols = [c_department, c_product_num]
-        select_exprs = ["a.department", "a.product_num"]
+        # 2) собираем detail по финальной логике:
+        #    товары из инвенты + все партии по ним на anchor_day
+        sql = """
+        WITH inv_scope AS (
+          SELECT DISTINCT
+            department,
+            anchor_day,
+            product_num
+          FROM public.batch_manual_anchor
+        ),
+        plan_scope AS (
+          SELECT
+            l.department,
+            l.product_num,
+            l.product_name,
+            l.snapshot_day AS anchor_day,
+            l.production_day,
+            l.qty_closing  AS plan_qty
+          FROM public.batch_daily_lifecycle l
+          JOIN inv_scope s
+            ON s.department = l.department
+           AND s.anchor_day = l.snapshot_day
+           AND s.product_num = l.product_num
+        ),
+        fact_scope AS (
+          SELECT
+            a.department,
+            a.product_num,
+            a.product_name,
+            a.anchor_day,
+            a.production_day,
+            a.qty_fact AS fact_qty
+          FROM public.batch_manual_anchor a
+        ),
+        x AS (
+          SELECT
+            COALESCE(f.department, p.department) AS department,
+            COALESCE(f.product_num, p.product_num) AS product_num,
+            COALESCE(f.product_name, p.product_name, ref.product_name) AS product_name,
+            COALESCE(f.anchor_day, p.anchor_day) AS anchor_day,
+            COALESCE(f.production_day, p.production_day) AS production_day,
 
-        if c_product_name:
-            insert_cols.append(c_product_name)
-            # берём имя из якоря, но если вдруг NULL — попробуем из prep_items_ref по canon_product_num
-            select_exprs.append(
-                "COALESCE(a.product_name, ref.product_name)"
-            )
-
-        insert_cols += [c_anchor_day, c_production_day, c_qty_fact]
-        select_exprs += ["a.anchor_day", "a.production_day", "a.qty_fact"]
-
-        # план / дифф (если колонки существуют)
-        # qty_plan
-        if c_qty_plan:
-            insert_cols.append(c_qty_plan)
-            select_exprs.append("COALESCE(l.qty_closing, 0)::numeric")
-
-        # diff_qty
-        if c_diff_qty:
-            insert_cols.append(c_diff_qty)
-            select_exprs.append("(a.qty_fact - COALESCE(l.qty_closing, 0))::numeric")
-
-        # доп. поля (если есть)
-        if c_batch_status:
-            insert_cols.append(c_batch_status)
-            select_exprs.append("l.batch_status")
-
-        if c_qty_opening:
-            insert_cols.append(c_qty_opening)
-            select_exprs.append("COALESCE(l.qty_opening, 0)::numeric")
-
-        if c_qty_closing:
-            insert_cols.append(c_qty_closing)
-            select_exprs.append("COALESCE(l.qty_closing, 0)::numeric")
-
-        if c_created_at:
-            insert_cols.append(c_created_at)
-            select_exprs.append("now()")
-
-        if c_updated_at:
-            insert_cols.append(c_updated_at)
-            select_exprs.append("now()")
-
-        sql_detail = f"""
-            INSERT INTO public.batch_anchor_diff ({", ".join(insert_cols)})
-            SELECT
-                {", ".join(select_exprs)}
-            FROM public.batch_manual_anchor a
-            LEFT JOIN public.batch_daily_lifecycle l
-              ON l.department = a.department
-             AND l.product_num = a.product_num
-             AND l.snapshot_day = a.anchor_day
-             AND l.production_day = a.production_day
-            LEFT JOIN public.prep_items_ref ref
-              ON public.canon_product_num(ref.product_num) = public.canon_product_num(a.product_num);
+            COALESCE(p.plan_qty, 0)::numeric AS plan_qty,
+            COALESCE(f.fact_qty, 0)::numeric AS fact_qty,
+            (COALESCE(f.fact_qty, 0) - COALESCE(p.plan_qty, 0))::numeric AS diff_qty
+          FROM plan_scope p
+          FULL OUTER JOIN fact_scope f
+            ON f.department = p.department
+           AND f.product_num = p.product_num
+           AND f.anchor_day = p.anchor_day
+           AND f.production_day = p.production_day
+          LEFT JOIN public.prep_items_ref ref
+            ON public.canon_product_num(ref.product_num) = public.canon_product_num(COALESCE(f.product_num, p.product_num))
+        )
+        INSERT INTO public.batch_anchor_diff (
+          department,
+          product_num,
+          product_name,
+          anchor_day,
+          production_day,
+          plan_qty,
+          fact_qty,
+          diff_qty,
+          created_at,
+          updated_at
+        )
+        SELECT
+          department,
+          product_num,
+          product_name,
+          anchor_day,
+          production_day,
+          plan_qty,
+          fact_qty,
+          diff_qty,
+          now(),
+          now()
+        FROM x
+        WHERE plan_qty <> 0 OR fact_qty <> 0;
         """
 
         try:
-            cur.execute(sql_detail)
+            cur.execute(sql)
             conn.commit()
-            print("✅ batch_anchor_diff пересобрана")
+            print("✅ batch_anchor_diff пересобрана (товары из инвенты + все партии по ним)")
         except Exception as e:
             conn.rollback()
             raise RuntimeError(f"Ошибка пересчёта batch_anchor_diff: {e}")
-
-        # 3) Собираем total-расхождения (агрегат по товару на anchor_day)
-        total_insert_cols = [tc_department, tc_product_num]
-        total_select_exprs = ["d.department", "d.product_num"]
-
-        if tc_product_name:
-            total_insert_cols.append(tc_product_name)
-            # в detail product_name может быть NULL — берём MAX/COALESCE
-            total_select_exprs.append("MAX(d.product_name)")
-
-        total_insert_cols.append(tc_anchor_day)
-        total_select_exprs.append("d.anchor_day")
-
-        # факт/план/дифф — только если колонки есть
-        if tc_qty_fact:
-            total_insert_cols.append(tc_qty_fact)
-            # detail.qty_fact гарантированно есть (по нашему обязательному c_qty_fact)
-            total_select_exprs.append("SUM(d.qty_fact)::numeric")
-
-        if tc_qty_plan:
-            total_insert_cols.append(tc_qty_plan)
-            if c_qty_plan:
-                total_select_exprs.append("SUM(d.qty_plan)::numeric")
-            else:
-                # если detail не хранит qty_plan, то пересчитаем план через join на lifecycle прямо тут
-                total_select_exprs.append(
-                    "SUM(COALESCE(l.qty_closing, 0))::numeric"
-                )
-
-        if tc_diff_qty:
-            total_insert_cols.append(tc_diff_qty)
-            if c_diff_qty:
-                total_select_exprs.append("SUM(d.diff_qty)::numeric")
-            else:
-                # diff = fact - plan
-                total_select_exprs.append(
-                    "(SUM(d.qty_fact) - SUM(COALESCE(l.qty_closing, 0)))::numeric"
-                )
-
-        if tc_created_at:
-            total_insert_cols.append(tc_created_at)
-            total_select_exprs.append("now()")
-
-        if tc_updated_at:
-            total_insert_cols.append(tc_updated_at)
-            total_select_exprs.append("now()")
-
-        # Источник для total:
-        # - если в detail есть qty_plan/diff_qty — просто агрегируем detail
-        # - если нет — подтягиваем lifecycle вторым join’ом (чтобы посчитать план)
-        if c_qty_plan or c_diff_qty:
-            sql_total = f"""
-                INSERT INTO public.batch_anchor_diff_total ({", ".join(total_insert_cols)})
-                SELECT
-                    {", ".join(total_select_exprs)}
-                FROM public.batch_anchor_diff d
-                GROUP BY d.department, d.product_num, d.anchor_day;
-            """
-        else:
-            sql_total = f"""
-                INSERT INTO public.batch_anchor_diff_total ({", ".join(total_insert_cols)})
-                SELECT
-                    {", ".join(total_select_exprs)}
-                FROM public.batch_anchor_diff d
-                LEFT JOIN public.batch_daily_lifecycle l
-                  ON l.department = d.department
-                 AND l.product_num = d.product_num
-                 AND l.snapshot_day = d.anchor_day
-                 AND l.production_day = d.production_day
-                GROUP BY d.department, d.product_num, d.anchor_day;
-            """
-
-        try:
-            cur.execute(sql_total)
-            conn.commit()
-            print("✅ batch_anchor_diff_total пересобрана")
-        except Exception as e:
-            conn.rollback()
-            raise RuntimeError(f"Ошибка пересчёта batch_anchor_diff_total: {e}")
 
 
 def main():
