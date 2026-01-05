@@ -259,23 +259,45 @@ def pick_turnover_column(cols: set[str]) -> str:
 
 
 def aggregate_rows(rows: list[dict], with_document: bool) -> list[dict]:
-    key_fields = ["department", "oper_day", "product_num", "product_name", "product_type", "measure_unit"]
-    if with_document:
-        key_fields.append("document")
-    key_fields.append("transaction_type")
+    """
+    Для with_document=True:
+      - уникальность: (department, product_num, document, transaction_type)
+      - oper_day = MAX
+      - turnover = SUM
+    Для without document — старая логика
+    """
 
     agg = {}
+
     for r in rows:
-        key = tuple(r.get(k) for k in key_fields)
+        if with_document and r.get("document") not in (None, ""):
+            key = (
+                r.get("department"),
+                r.get("product_num"),
+                r.get("document"),
+                r.get("transaction_type"),
+            )
+        else:
+            key = (
+                r.get("department"),
+                r.get("oper_day"),
+                r.get("product_num"),
+                r.get("transaction_type"),
+            )
+
         if key not in agg:
             agg[key] = dict(r)
         else:
+            # суммируем оборот
             agg[key]["turnover"] = float(agg[key].get("turnover") or 0) + float(r.get("turnover") or 0)
+
+            # для document — обновляем oper_day на максимальный
+            if with_document and r.get("document") not in (None, ""):
+                agg[key]["oper_day"] = max(agg[key]["oper_day"], r.get("oper_day"))
 
     out = list(agg.values())
     print(f"📌 После агрегации ({'с document' if with_document else 'без document'}): {len(out)} строк")
     return out
-
 
 # ========== Upsert ==========
 def upsert_stock_tx(conn, rows: list[dict]):
