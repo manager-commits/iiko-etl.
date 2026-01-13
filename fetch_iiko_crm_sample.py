@@ -78,14 +78,13 @@ def fetch_crm_report(token: str, date_from: dt.date, date_to: dt.date) -> dict:
 
         # фильтры
         "filters": {
-            # SessionID.OperDay: includeHigh = False (верхняя граница эксклюзивна)
-            "SessionID.OperDay": {
+            "OpenDate.Typed": {
                 "filterType": "DateRange",
                 "periodType": "CUSTOM",
                 "from": date_from.strftime("%Y-%m-%d"),
                 "to": date_to.strftime("%Y-%m-%d"),
                 "includeLow": True,
-                "includeHigh": False,
+                "includeHigh": True,
             },
             "DeletedWithWriteoff": {
                 "filterType": "IncludeValues",
