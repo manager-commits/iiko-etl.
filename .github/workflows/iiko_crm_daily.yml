@@ -1,0 +1,50 @@
+name: iiko CRM daily (to Neon CRM)
+
+on:
+  workflow_dispatch:
+    inputs:
+      date_from:
+        description: "DATE_FROM (YYYY-MM-DD)"
+        required: false
+      date_to:
+        description: "DATE_TO (YYYY-MM-DD)"
+        required: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests psycopg2-binary
+
+      - name: Run iiko CRM ETL
+        env:
+          # iiko
+          IIKO_BASE_URL: ${{ secrets.IIKO_BASE_URL }}
+          IIKO_LOGIN: ${{ secrets.IIKO_LOGIN }}
+          IIKO_PASSWORD: ${{ secrets.IIKO_PASSWORD }}
+
+          # period
+          DATE_FROM: ${{ github.event.inputs.date_from }}
+          DATE_TO: ${{ github.event.inputs.date_to }}
+
+          # Neon CRM (new project)
+          PG_CRM_HOST: ${{ secrets.PG_CRM_HOST }}
+          PG_CRM_PORT: ${{ secrets.PG_CRM_PORT }}
+          PG_CRM_DB: ${{ secrets.PG_CRM_DB }}
+          PG_CRM_USER: ${{ secrets.PG_CRM_USER }}
+          PG_CRM_PASSWORD: ${{ secrets.PG_CRM_PASSWORD }}
+          PG_CRM_SSLMODE: ${{ secrets.PG_CRM_SSLMODE }}
+
+        run: |
+          python etl_iiko_crm_daily.py
