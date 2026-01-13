@@ -40,7 +40,7 @@ jobs:
           DATE_TO: ${{ github.event.inputs.date_to }}
           SAMPLE_LIMIT: ${{ github.event.inputs.sample_limit }}
         run: |
-          python etl/fetch_iiko_crm_sample.py
+          python fetch_iiko_crm_sample.py
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
