@@ -106,7 +106,8 @@ def fetch_crm_report(token: str, date_from: dt.date, date_to: dt.date) -> dict:
         },
 
         # иногда iiko ждёт reportId для кастомных отчётов — кладём сразу
-        "reportId": REPORT_ID,
+        "id": REPORT_ID,
+"name": "Отчёт для CRM",
     }
 
     resp = requests.post(url, params=params, json=body, timeout=120)
