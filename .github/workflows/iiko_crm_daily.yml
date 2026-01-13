@@ -1,6 +1,7 @@
 name: iiko CRM daily (to Neon CRM)
 
 on:
+  # ручной запуск (как раньше)
   workflow_dispatch:
     inputs:
       date_from:
@@ -9,6 +10,10 @@ on:
       date_to:
         description: "DATE_TO (YYYY-MM-DD)"
         required: false
+
+  # авто-запуск каждый день в 07:00 по Москве (04:00 UTC)
+  schedule:
+    - cron: "0 4 * * *"
 
 jobs:
   run:
@@ -34,11 +39,11 @@ jobs:
           IIKO_LOGIN: ${{ secrets.IIKO_LOGIN }}
           IIKO_PASSWORD: ${{ secrets.IIKO_PASSWORD }}
 
-          # period
+          # period (если пусто — скрипт сам возьмёт вчера -> сегодня)
           DATE_FROM: ${{ github.event.inputs.date_from }}
           DATE_TO: ${{ github.event.inputs.date_to }}
 
-          # Neon CRM (new project)
+          # Neon CRM
           PG_CRM_HOST: ${{ secrets.PG_CRM_HOST }}
           PG_CRM_PORT: ${{ secrets.PG_CRM_PORT }}
           PG_CRM_DB: ${{ secrets.PG_CRM_DB }}
