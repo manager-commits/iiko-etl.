@@ -1,0 +1,59 @@
+name: iiko T1 light ETL (to Neon CRM)
+
+on:
+  # Ручной запуск с датами
+  workflow_dispatch:
+    inputs:
+      date_from:
+        description: 'Начало периода (YYYY-MM-DD)'
+        required: false
+      date_to:
+        description: 'Конец периода (YYYY-MM-DD)'
+        required: false
+
+  # Авто-запуск каждый день
+  # GitHub Actions работает в UTC.
+  # 04:00 UTC = 07:00 по Москве (UTC+3).
+  schedule:
+    - cron: '0 4 * * *'
+
+jobs:
+  etl:
+    runs-on: ubuntu-latest
+
+    env:
+      # iiko
+      IIKO_BASE_URL: ${{ secrets.IIKO_BASE_URL }}
+      IIKO_LOGIN: ${{ secrets.IIKO_LOGIN }}
+      IIKO_PASSWORD: ${{ secrets.IIKO_PASSWORD }}
+
+      # Postgres (Neon CRM project)
+      PG_CRM_HOST: ${{ secrets.PG_CRM_HOST }}
+      PG_CRM_PORT: ${{ secrets.PG_CRM_PORT }}
+      PG_CRM_DB: ${{ secrets.PG_CRM_DB }}
+      PG_CRM_USER: ${{ secrets.PG_CRM_USER }}
+      PG_CRM_PASSWORD: ${{ secrets.PG_CRM_PASSWORD }}
+      PG_CRM_SSLMODE: ${{ secrets.PG_CRM_SSLMODE }}
+
+      # Даты. При автоматическом запуске они будут пустыми,
+      # и скрипт сам возьмёт "вчера".
+      DATE_FROM: ${{ github.event.inputs.date_from }}
+      DATE_TO: ${{ github.event.inputs.date_to }}
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run iiko T1 Light ETL (CRM)
+        run: |
+          python etl_iiko_t1_light_crm.py
