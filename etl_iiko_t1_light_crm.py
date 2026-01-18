@@ -1,19 +1,28 @@
 import os
 import datetime as dt
+import time
 import requests
 import psycopg2
 from dotenv import load_dotenv
 
-# Загружаем переменные окружения (.env) — локально полезно, в GitHub Actions тоже не мешает
 load_dotenv()
 
-# Настройки iiko (берём из секретов GitHub)
 IIKO_BASE_URL = os.getenv("IIKO_BASE_URL", "").rstrip("/")
 IIKO_LOGIN = os.getenv("IIKO_LOGIN")
 IIKO_PASSWORD = os.getenv("IIKO_PASSWORD")
 
+# Таймауты: (connect, read)
+HTTP_CONNECT_TIMEOUT = int(os.getenv("HTTP_CONNECT_TIMEOUT", "20"))
+HTTP_READ_TIMEOUT = int(os.getenv("HTTP_READ_TIMEOUT", "300"))
 
-# Подключение к Postgres (Neon) — теперь через PG_CRM_*
+# Ретраи
+HTTP_RETRIES = int(os.getenv("HTTP_RETRIES", "3"))
+HTTP_RETRY_SLEEP_SEC = int(os.getenv("HTTP_RETRY_SLEEP_SEC", "5"))
+
+# Размер чанка в днях (7 = неделя)
+CHUNK_DAYS = int(os.getenv("CHUNK_DAYS", "7"))
+
+
 def get_pg_connection():
     return psycopg2.connect(
         host=os.getenv("PG_CRM_HOST"),
@@ -25,30 +34,25 @@ def get_pg_connection():
     )
 
 
-# Функция получения токена от iiko
 def get_token():
     url = f"{IIKO_BASE_URL}/api/auth"
     params = {"login": IIKO_LOGIN, "pass": IIKO_PASSWORD}
-
-    resp = requests.get(url, params=params, timeout=30)
+    resp = requests.get(url, params=params, timeout=(HTTP_CONNECT_TIMEOUT, HTTP_READ_TIMEOUT))
     resp.raise_for_status()
-
     token = resp.text.strip()
-    print(f"🔑 Токен получен: {token[:6]}...")
+    print(f"🔑 Token: {token[:6]}...")
     return token
 
 
-# Корректный logout
 def logout(token: str):
     url = f"{IIKO_BASE_URL}/api/logout"
     params = {"key": token}
     try:
-        requests.post(url, params=params, timeout=10)
+        requests.post(url, params=params, timeout=(HTTP_CONNECT_TIMEOUT, 30))
     except Exception as e:
-        print("⚠️ Ошибка при logout:", e)
+        print("⚠️ Logout error:", e)
 
 
-# Работа с периодом выгрузки
 def get_period():
     date_from_str = os.getenv("DATE_FROM")
     date_to_str = os.getenv("DATE_TO")
@@ -56,20 +60,34 @@ def get_period():
     if date_from_str and date_to_str:
         date_from = dt.date.fromisoformat(date_from_str)
         date_to = dt.date.fromisoformat(date_to_str)
-        print(f"📅 Используем период из ENV: {date_from} – {date_to}")
+        print(f"📅 Period from ENV: {date_from} -> {date_to}")
         return date_from, date_to
 
-    # По умолчанию — вчера
+    # default: yesterday
     today = dt.date.today()
-    date_from = today - dt.timedelta(days=1)
-    date_to = today - dt.timedelta(days=1)
-    print(f"📅 Используем период по умолчанию: {date_from}")
-    return date_from, date_to
+    d = today - dt.timedelta(days=1)
+    print(f"📅 Default period: {d}")
+    return d, d
 
 
-def fetch_t1_light(token, date_from, date_to):
-    print("📦 Загружаем данные TI Light из iiko...")
+def day_chunks(date_from: dt.date, date_to: dt.date, chunk_days: int):
+    """
+    Режет период на чанки по chunk_days (включительно по date_to).
+    Пример (7): 2023-01-01..2023-01-07, 2023-01-08..2023-01-14, ...
+    """
+    if chunk_days < 1:
+        raise ValueError("chunk_days must be >= 1")
 
+    chunks = []
+    start = date_from
+    while start <= date_to:
+        end = min(start + dt.timedelta(days=chunk_days - 1), date_to)
+        chunks.append((start, end))
+        start = end + dt.timedelta(days=1)
+    return chunks
+
+
+def fetch_t1_light(token: str, date_from: dt.date, date_to: dt.date):
     url = f"{IIKO_BASE_URL}/api/v2/reports/olap"
     params = {"key": token}
 
@@ -114,32 +132,49 @@ def fetch_t1_light(token, date_from, date_to):
         },
     }
 
-    resp = requests.post(url, params=params, json=body, timeout=90)
+    last_err = None
+    for attempt in range(1, HTTP_RETRIES + 1):
+        try:
+            print(f"📦 iiko OLAP request: {date_from} -> {date_to} (attempt {attempt}/{HTTP_RETRIES})")
+            resp = requests.post(
+                url,
+                params=params,
+                json=body,
+                timeout=(HTTP_CONNECT_TIMEOUT, HTTP_READ_TIMEOUT),
+            )
+            print("HTTP:", resp.status_code)
 
-    print("HTTP статус iiko:", resp.status_code)
-    print("Тело ответа iiko (первые 1000 символов):")
-    print(resp.text[:1000])
+            if resp.status_code >= 400:
+                print("iiko response (first 1000 chars):")
+                print(resp.text[:1000])
 
-    resp.raise_for_status()
+            resp.raise_for_status()
+            return resp.json()
 
-    print("✅ Данные получены")
-    return resp.json()
+        except (requests.exceptions.ReadTimeout, requests.exceptions.ConnectionError) as e:
+            last_err = e
+            print(f"⏳ Network/timeout error: {e}")
+            if attempt < HTTP_RETRIES:
+                print(f"🔁 Sleep {HTTP_RETRY_SLEEP_SEC}s then retry...")
+                time.sleep(HTTP_RETRY_SLEEP_SEC)
+            else:
+                raise
+        except Exception:
+            raise
+
+    raise last_err
 
 
-def upsert_t1_light(data):
-    print("💾 Запись данных в базу Neon...")
-
+def upsert_t1_light(data: dict):
     rows = data.get("data", [])
-    print(f"📊 Получено строк: {len(rows)}")
-
+    print(f"📊 Rows received: {len(rows)}")
     if not rows:
-        print("⚠️ Нет данных для записи")
+        print("⚠️ No data to write.")
         return
 
     conn = get_pg_connection()
     cur = conn.cursor()
 
-    # ВАЖНО: пишем именно в crm.iiko_t1_light
     query = """
     INSERT INTO crm.iiko_t1_light (
         delivery_cooking_finish_time,
@@ -183,13 +218,16 @@ def upsert_t1_light(data):
     )
     ON CONFLICT (department, delivery_cooking_finish_time, delivery_number)
     DO UPDATE SET
+        open_time = EXCLUDED.open_time,
         delivery_print_time = EXCLUDED.delivery_print_time,
         delivery_send_time = EXCLUDED.delivery_send_time,
         delivery_actual_time = EXCLUDED.delivery_actual_time,
         delivery_close_time = EXCLUDED.delivery_close_time,
         delivery_expected_time = EXCLUDED.delivery_expected_time,
+        open_date = EXCLUDED.open_date,
         delivery_source_key = EXCLUDED.delivery_source_key,
         delivery_comment = EXCLUDED.delivery_comment,
+        delivery_region = EXCLUDED.delivery_region,
         delivery_customer_name = EXCLUDED.delivery_customer_name,
         delivery_phone = EXCLUDED.delivery_phone,
         delivery_address = EXCLUDED.delivery_address,
@@ -203,21 +241,29 @@ def upsert_t1_light(data):
     conn.commit()
     cur.close()
     conn.close()
-
-    print("✅ Данные успешно записаны!")
+    print("✅ Upsert done")
 
 
 def main():
     date_from, date_to = get_period()
-    print(f"🚀 Старт ETL TI Light: {date_from} – {date_to}")
+    print(f"🚀 ETL TI Light (CRM): {date_from} -> {date_to}")
 
     token = get_token()
     try:
-        data = fetch_t1_light(token, date_from, date_to)
-        upsert_t1_light(data)
+        if date_from != date_to:
+            chunks = day_chunks(date_from, date_to, CHUNK_DAYS)
+        else:
+            chunks = [(date_from, date_to)]
+
+        print(f"🧩 Chunks: {len(chunks)} (chunk_days={CHUNK_DAYS})")
+        for i, (d1, d2) in enumerate(chunks, 1):
+            print(f"\n=== Chunk {i}/{len(chunks)}: {d1} -> {d2} ===")
+            data = fetch_t1_light(token, d1, d2)
+            upsert_t1_light(data)
+
     finally:
         logout(token)
-        print("🔐 Logout выполнен")
+        print("🔐 Logout done")
 
 
 if __name__ == "__main__":
