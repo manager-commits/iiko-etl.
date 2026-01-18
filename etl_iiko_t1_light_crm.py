@@ -11,15 +11,15 @@ IIKO_BASE_URL = os.getenv("IIKO_BASE_URL", "").rstrip("/")
 IIKO_LOGIN = os.getenv("IIKO_LOGIN")
 IIKO_PASSWORD = os.getenv("IIKO_PASSWORD")
 
-# Таймауты: (connect, read)
+# Таймауты HTTP: (connect, read)
 HTTP_CONNECT_TIMEOUT = int(os.getenv("HTTP_CONNECT_TIMEOUT", "20"))
 HTTP_READ_TIMEOUT = int(os.getenv("HTTP_READ_TIMEOUT", "300"))
 
-# Ретраи
+# Ретраи HTTP
 HTTP_RETRIES = int(os.getenv("HTTP_RETRIES", "3"))
 HTTP_RETRY_SLEEP_SEC = int(os.getenv("HTTP_RETRY_SLEEP_SEC", "5"))
 
-# Размер чанка в днях (7 = неделя)
+# Размер чанка в днях (по умолчанию 7 = неделя)
 CHUNK_DAYS = int(os.getenv("CHUNK_DAYS", "7"))
 
 
@@ -34,7 +34,7 @@ def get_pg_connection():
     )
 
 
-def get_token():
+def get_token() -> str:
     url = f"{IIKO_BASE_URL}/api/auth"
     params = {"login": IIKO_LOGIN, "pass": IIKO_PASSWORD}
     resp = requests.get(url, params=params, timeout=(HTTP_CONNECT_TIMEOUT, HTTP_READ_TIMEOUT))
@@ -70,28 +70,26 @@ def get_period():
     return d, d
 
 
-def day_chunks(date_from: dt.date, date_to: dt.date, chunk_days: int):
+def week_chunks(date_from: dt.date, date_to: dt.date, chunk_days: int = 7):
     """
-    Режет период на чанки по chunk_days (включительно по date_to).
-    Пример (7): 2023-01-01..2023-01-07, 2023-01-08..2023-01-14, ...
+    Режем на интервалы по N дней (по умолчанию 7).
+    date_to включительно.
+    Пример: 01-07, 08-14, ...
     """
-    if chunk_days < 1:
-        raise ValueError("chunk_days must be >= 1")
+    if chunk_days <= 0:
+        chunk_days = 7
 
     chunks = []
-    start = date_from
-    while start <= date_to:
-        end = min(start + dt.timedelta(days=chunk_days - 1), date_to)
-        chunks.append((start, end))
-        start = end + dt.timedelta(days=1)
+    cur = date_from
+    while cur <= date_to:
+        end = min(cur + dt.timedelta(days=chunk_days - 1), date_to)
+        chunks.append((cur, end))
+        cur = end + dt.timedelta(days=1)
     return chunks
 
 
-def fetch_t1_light(token: str, date_from: dt.date, date_to: dt.date):
-    url = f"{IIKO_BASE_URL}/api/v2/reports/olap"
-    params = {"key": token}
-
-    body = {
+def build_olap_body(date_from: dt.date, date_to: dt.date):
+    return {
         "reportType": "SALES",
         "buildSummary": False,
         "groupByRowFields": [
@@ -132,8 +130,20 @@ def fetch_t1_light(token: str, date_from: dt.date, date_to: dt.date):
         },
     }
 
+
+def fetch_t1_light_with_token_refresh(token_ref: dict, date_from: dt.date, date_to: dt.date) -> dict:
+    """
+    token_ref = {"token": "..."} — чтобы можно было обновить токен внутри функции.
+    При 401 перевыпускаем токен и повторяем запрос.
+    """
+    url = f"{IIKO_BASE_URL}/api/v2/reports/olap"
+
+    body = build_olap_body(date_from, date_to)
+
     last_err = None
     for attempt in range(1, HTTP_RETRIES + 1):
+        token = token_ref["token"]
+        params = {"key": token}
         try:
             print(f"📦 iiko OLAP request: {date_from} -> {date_to} (attempt {attempt}/{HTTP_RETRIES})")
             resp = requests.post(
@@ -142,7 +152,18 @@ def fetch_t1_light(token: str, date_from: dt.date, date_to: dt.date):
                 json=body,
                 timeout=(HTTP_CONNECT_TIMEOUT, HTTP_READ_TIMEOUT),
             )
+
             print("HTTP:", resp.status_code)
+
+            if resp.status_code == 401:
+                print("🔁 401 Unauthorized — token expired/invalid. Refresh token and retry chunk...")
+                try:
+                    logout(token)
+                except Exception:
+                    pass
+                token_ref["token"] = get_token()
+                # повторяем этот же attempt (без sleep)
+                continue
 
             if resp.status_code >= 400:
                 print("iiko response (first 1000 chars):")
@@ -159,7 +180,7 @@ def fetch_t1_light(token: str, date_from: dt.date, date_to: dt.date):
                 time.sleep(HTTP_RETRY_SLEEP_SEC)
             else:
                 raise
-        except Exception:
+        except Exception as e:
             raise
 
     raise last_err
@@ -248,21 +269,21 @@ def main():
     date_from, date_to = get_period()
     print(f"🚀 ETL TI Light (CRM): {date_from} -> {date_to}")
 
-    token = get_token()
+    token_ref = {"token": get_token()}
     try:
-        if date_from != date_to:
-            chunks = day_chunks(date_from, date_to, CHUNK_DAYS)
-        else:
-            chunks = [(date_from, date_to)]
-
+        chunks = week_chunks(date_from, date_to, chunk_days=CHUNK_DAYS) if date_from != date_to else [(date_from, date_to)]
         print(f"🧩 Chunks: {len(chunks)} (chunk_days={CHUNK_DAYS})")
+
         for i, (d1, d2) in enumerate(chunks, 1):
             print(f"\n=== Chunk {i}/{len(chunks)}: {d1} -> {d2} ===")
-            data = fetch_t1_light(token, d1, d2)
+            data = fetch_t1_light_with_token_refresh(token_ref, d1, d2)
             upsert_t1_light(data)
 
     finally:
-        logout(token)
+        try:
+            logout(token_ref["token"])
+        except Exception:
+            pass
         print("🔐 Logout done")
 
 
