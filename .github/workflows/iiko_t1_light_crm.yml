@@ -35,6 +35,12 @@ jobs:
       PG_CRM_PASSWORD: ${{ secrets.PG_CRM_PASSWORD }}
       PG_CRM_SSLMODE: ${{ secrets.PG_CRM_SSLMODE }}
 
+      # (опционально) таймауты/ретраи iiko
+      HTTP_CONNECT_TIMEOUT: 20
+      HTTP_READ_TIMEOUT: 300
+      HTTP_RETRIES: 3
+      HTTP_RETRY_SLEEP_SEC: 5
+
       # Даты. При автоматическом запуске они будут пустыми,
       # и скрипт сам возьмёт "вчера".
       DATE_FROM: ${{ github.event.inputs.date_from }}
